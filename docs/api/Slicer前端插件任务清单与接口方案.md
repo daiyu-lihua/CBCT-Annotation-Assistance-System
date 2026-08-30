@@ -40,7 +40,7 @@
 | 错误统一格式 | `{status:"error", error_code, message, details}` |
 | 前端请求方式 | 3D Slicer 用 Python `requests` / `urllib`，**必须异步**（开子线程），避免界面卡死 |
 
-统一错误码（前端要做的映射）：`IMAGE_NOT_FOUND`、`UNSUPPORTED_FORMAT`、`INVALID_ROI`、`MODEL_NOT_LOADED`、`CUDA_OUT_OF_MEMORY`、`PREDICTION_FAILED`、`LABEL_NOT_FOUND`、`LABEL_FORMAT_ERROR`、`EXPORT_FAILED`。
+统一错误码（前端要做的映射)：`IMAGE_NOT_FOUND`、`UNSUPPORTED_FORMAT`、`INVALID_ROI`、`MODEL_NOT_LOADED`、`CUDA_OUT_OF_MEMORY`、`PREDICTION_FAILED`、`LABEL_NOT_FOUND`、`LABEL_FORMAT_ERROR`、`EXPORT_FAILED`。
 
 ### 2.2 前端需要对接的接口清单
 

@@ -386,7 +386,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
     def _log(self, msg):
         self.logEdit.appendPlainText(msg)
         sb = self.logEdit.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        sb.setValue(sb.maximum)
         import logging
         logging.getLogger("CBCTAnnotator").info(msg)
 

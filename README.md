@@ -23,21 +23,24 @@ CBCT 数据导入
 
 ```text
 .
-├── docs/
-├── configs/
-├── data/
-├── data_tools/
-├── training/
-├── inference_server/
-├── slicer_extension/
-├── agent/
-├── quality_control/
-├── deployment/
-├── tests/
-├── scripts/
-├── assets/
-├── outputs/
-└── README.md
+├── README.md
+├── user/                    用户层
+│   ├── plugin/              3D Slicer 插件本体 (CBCTAnnotator.py, lib/ApiClient.py)
+│   └── launcher/            启动入口：一键启动服务、环境说明
+├── implementation/          实现层：后台服务、模型接入、Agent
+│   ├── server/inference/    本地推理服务端（现为 mock 假后端, FastAPI）
+│   ├── model/               模型接入（预留，接 A 组模型）
+│   └── agent/               Agent 调度（预留）
+├── docs/                    各类文档（项目介绍 / 使用指南 / 接口方案）
+├── data/                    数据层：inputs 原始数据、outputs 运行产物（均不入库）
+├── configs/                 配置文件（规划预留）
+├── data_tools/              数据处理脚本（规划预留）
+├── training/                模型训练代码（规划预留，A 组）
+├── quality_control/         标签质检（规划预留）
+├── deployment/              端侧部署（规划预留）
+├── tests/                   测试（规划预留）
+├── scripts/                 辅助脚本（规划预留）
+└── assets/                  非代码资源（规划预留）
 ```
 
 ## docs/
@@ -47,18 +50,23 @@ CBCT 数据导入
 建议内容：
 
 - 项目架构说明；
+- 使用指南与用户手册；
 - API 接口协议；
 - 标签规范；
-- 开发流程说明；
-- 会议记录；
-- 阶段总结；
-- 软著、专利、结题材料草稿。
+- 阶段总结、软著、专利、结题材料草稿。
 
-子目录说明：
+当前已有子目录：
+
+```text
+docs/项目介绍/       项目背景、开发分工与实现说明
+docs/使用指南/       插件使用手册（用户如何操作）
+docs/接口与开发/     前后端接口协议、请求响应格式、错误码说明
+```
+
+规划预留子目录：
 
 ```text
 docs/architecture/     系统架构、模块关系、运行流程图
-docs/api/              前后端接口协议、请求响应格式、错误码说明
 docs/labeling/         牙位编号规则、标签模板、标注规范
 docs/meeting_notes/    组会记录、任务分配、阶段复盘
 ```
@@ -89,10 +97,16 @@ configs/inference/     快速、均衡、精细三种推理模式配置
 
 注意：真实患者原始数据和敏感医学影像不应上传到公开 GitHub 仓库。该目录可以保留结构，但真实数据应根据实验室或医院要求保存在本地、内网或受控存储中。
 
-子目录说明：
+当前落盘目录（已被 .gitignore 排除，不入库）：
 
 ```text
-data/raw/              原始 CBCT 数据，例如 DICOM、nii.gz、nrrd
+data/inputs/     本次使用的原始 CBCT 输入（脱敏）
+data/outputs/    推理/标注/导出运行产物（mock 预测 mask、导出训练包等）
+```
+
+规划子目录：
+
+```text
 data/processed/        预处理后的图像数据，例如重采样、裁剪后的数据
 data/labels/           人工标注或人工修正后的标签
 data/predictions/      AI 模型生成的初分割结果
@@ -143,36 +157,40 @@ training/semi_supervised/  半监督学习、伪标签生成、伪标签筛选
 training/export/           PyTorch 权重导出、ONNX 导出
 ```
 
-## inference_server/
+## implementation/server/inference/
 
-用于存放本地 AI 推理服务端代码。
+用于存放本地 AI 推理服务端代码（当前为 mock 假后端，FastAPI 实现）。
 
-该模块建议使用 FastAPI 实现。FastAPI 服务负责接收 3D Slicer 或 Agent 的请求，完成图像预处理、模型推理、后处理和结果返回。
+服务端负责接收 3D Slicer 或 Agent 的请求，完成图像读取、推理调用、结果返回；后续接入真实模型后，在此增加预处理与后处理。当前 `/status`、`/config`、`/predict`、`/check_label`、`/export` 等 9 个接口已就绪。
 
-子目录说明：
-
-```text
-inference_server/api/          接口路由，例如 /predict、/status、/check_label
-inference_server/schemas/      请求和响应的数据结构定义
-inference_server/services/     推理服务、图像读取、配置管理等业务逻辑
-inference_server/runtime/      模型加载、ONNX Runtime、TensorRT 等运行逻辑
-inference_server/postprocess/  连通域分析、孔洞填补、小碎片去除、实例编号整理
-```
-
-## slicer_extension/
-
-用于存放 3D Slicer 插件代码。
-
-3D Slicer 插件负责提供桌面 GUI 操作入口，包括加载 CBCT、选择 ROI、调用后端服务、显示 AI 分割结果、人工修正和导出标签。
-
-子目录说明：
+规划子目录：
 
 ```text
-slicer_extension/CBCTAnnotator/  项目自定义 Slicer 插件主体
-slicer_extension/resources/      插件图标、界面资源、示例配置
+implementation/server/inference/api/          接口路由，例如 /predict、/status、/check_label
+implementation/server/inference/schemas/      请求和响应的数据结构定义
+implementation/server/inference/services/     推理服务、图像读取、配置管理等业务逻辑
+implementation/server/inference/runtime/      模型加载、ONNX Runtime、TensorRT 等运行逻辑
+implementation/server/inference/postprocess/  连通域分析、孔洞填补、小碎片去除、实例编号整理
 ```
 
-## agent/
+## implementation/model/
+
+用于存放模型接入代码（预留，待 A 组模型到位后接入）。
+
+真实牙齿分割模型推理脚本、权重管理在此对接 `server/inference` 的 `/predict` 实现。权重放 `model/weights/`（已被 .gitignore 排除，否则不入库）。
+
+## user/plugin/
+
+用于存放 3D Slicer 插件（用户层前端）代码。
+
+插件负责提供桌面 GUI 操作入口：加载 CBCT、选择 ROI、调用后端服务、显示 AI 分割结果、人工修正和导出标签。
+
+```text
+user/plugin/CBCTAnnotator.py   插件主模块（数据导入 / ROI / 分割 / 修正 / 质检 / 导出 等卡片界面）
+user/plugin/lib/ApiClient.py   后端接口封装层
+```
+
+## implementation/agent/
 
 用于存放标注流程 Agent 相关代码与规则。
 

@@ -37,6 +37,9 @@ _TEXT_DIM = "#7a8699"
 _DANGER = "#d64545"
 _OK = "#2e9e6b"
 
+# 新的 96 类稠密标签规范默认模板 ID（与 mock 服务端 LABEL_TEMPLATE_ID 保持一致）
+_DEFAULT_TEMPLATE_ID = "teeth-dense-96"
+
 _PANEL_QSS = f"""
 #cbctPanel {{ background-color: {_BG}; }}
 
@@ -88,6 +91,33 @@ QProgressBar {{
     text-align: center; color: transparent;
 }}
 QProgressBar::chunk {{ background: {_PRIMARY}; border-radius: 4px; }}
+
+#cbctScroll {{ background: transparent; border: none; }}
+#cardHead {{ background: transparent; }}
+#cardBody {{ background: transparent; }}
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: #c7d2e0; border-radius: 5px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: #a9b8cc; }}
+QScrollBar::add-line, QScrollBar::sub-line,
+QScrollBar::add-page, QScrollBar::sub-page {{ height: 0; width: 0; background: none; }}
+
+#cardToggle {{
+    font-size: 13px; font-weight: bold; color: {_PRIMARY_DARK};
+    border: none; background: transparent; text-align: left; padding: 2px 0;
+}}
+#cardToggle:hover {{ color: {_PRIMARY}; }}
+QLabel#stepBadge {{
+    background: {_PRIMARY}; color: #fff; font-weight: bold; border-radius: 9px;
+    min-width: 16px; max-width: 16px; min-height: 16px; max-height: 16px;
+    font-size: 11px; padding: 2px 0 0 0;
+}}
+QLabel#sectionTitle {{
+    font-size: 12px; font-weight: bold; color: {_TEXT_DIM}; margin: 6px 2px 0 2px;
+}}
+QLabel#cardDot {{ font-size: 13px; font-weight: bold; }}
+#statusbar {{
+    background: {_CARD}; border: 1px solid {_BORDER}; border-radius: 10px;
+}}
 """
 
 
@@ -109,16 +139,64 @@ class CBCTAnnotator(ScriptedLoadableModule):
         )
 
 
-def _make_card(title):
-    """构造一个白色卡片，返回 (card, bodyLayout)。"""
+# 卡片元数据（dot/toggle/body）以 card 为键存储；PythonQt 不允许往 C++ 对象挂属性
+_CARD_META = {}
+
+
+def _make_card(title, step=None):
+    """构造一个可折叠白色卡片，返回 (card, bodyLayout)。
+
+    - step 传入则显示步骤编号徽标（1..n），暗示流程顺序
+    - 卡片标题可点击折叠/展开；右侧圆点用于状态就近反馈
+    说明：PythonQt 不允许给 C++ QFrame 挂自定义属性，因此卡片元数据
+    统一存到模块级 _CARD_META（以 card 对象为键）。
+    """
     card = qt.QFrame()
     card.setObjectName("card")
-    v = qt.QVBoxLayout(card)
-    v.setContentsMargins(14, 12, 14, 14)
+    outer = qt.QVBoxLayout(card)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(0)
+
+    head = qt.QFrame()
+    head.setObjectName("cardHead")
+    hbox = qt.QHBoxLayout(head)
+    hbox.setContentsMargins(14, 6, 12, 2)
+    hbox.setSpacing(8)
+    if step:
+        badge = qt.QLabel(str(step))
+        badge.setObjectName("stepBadge")
+        badge.setAlignment(qt.Qt.AlignCenter)
+        hbox.addWidget(badge)
+
+    titleBtn = qt.QPushButton()
+    titleBtn.setObjectName("cardToggle")
+    titleBtn.setFlat(True)
+    titleBtn.setCheckable(True)
+    titleBtn.setChecked(True)
+    titleBtn.setCursor(qt.Qt.PointingHandCursor)
+    hbox.addWidget(titleBtn)
+    hbox.addStretch(1)
+
+    dot = qt.QLabel("○")
+    dot.setObjectName("cardDot")
+    dot.setStyleSheet(f"QLabel#cardDot{{color:{_TEXT_DIM};}}")
+    hbox.addWidget(dot)
+    outer.addWidget(head)
+
+    body = qt.QFrame()
+    body.setObjectName("cardBody")
+    v = qt.QVBoxLayout(body)
+    v.setContentsMargins(14, 2, 14, 14)
     v.setSpacing(8)
-    t = qt.QLabel(title)
-    t.setObjectName("cardTitle")
-    v.addWidget(t)
+    outer.addWidget(body)
+
+    def _on_toggle(checked):
+        body.setVisible(checked)
+        titleBtn.setText(("▼ " if checked else "▶ ") + title)
+    titleBtn.setText(("▼ " if titleBtn.isChecked() else "▶ ") + title)
+    titleBtn.clicked.connect(_on_toggle)
+
+    _CARD_META[card] = {"dot": dot, "toggle": titleBtn, "body": body}
     return card, v
 
 
@@ -166,22 +244,71 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         m.addWidget(hint)
         m.addSpacing(2)
 
-        m.addWidget(self._build_status_card())      # 状态 + 日志（置顶）
-        m.addWidget(self._build_import_card())      # 数据导入
-        m.addWidget(self._build_roi_card())         # ROI 选择
-        m.addWidget(self._build_connect_card())     # 服务连接
-        m.addWidget(self._build_config_card())      # 模型/配置
-        m.addWidget(self._build_predict_card())     # AI 分割
-        m.addWidget(self._build_correct_card())     # 人工修正
-        m.addWidget(self._build_quality_card())     # 标签质检
-        m.addWidget(self._build_export_card())      # 结果导出
+        # ---- 顶部状态条（常驻，不随滚动）----
+        bar = qt.QFrame()
+        bar.setObjectName("statusbar")
+        bl = qt.QHBoxLayout(bar)
+        bl.setContentsMargins(14, 8, 14, 8)
+        self.statusLabel = qt.QLabel("尚未连接服务端")
+        self.statusLabel.setObjectName("value")
+        self.statusLabel.setWordWrap(True)
+        bl.addWidget(self.statusLabel, 1)
+        self.progressBar = qt.QProgressBar()
+        self.progressBar.setRange(0, 0)   # busy 动画模式
+        self.progressBar.setVisible(False)
+        self.progressBar.setMaximumHeight(8)
+        self.progressBar.setFixedWidth(180)
+        bl.addWidget(self.progressBar)
+        m.addWidget(bar)
 
-        m.addStretch(1)
+        # ---- 日志（置顶，常驻不随滚动）----
+        m.addWidget(self._build_log_card())
+
+        # ---- 主区：卡片放进可滚动容器，避免面板裁切 ----
+        scroll = qt.QScrollArea()
+        scroll.setObjectName("cbctScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(qt.QFrame.NoFrame)
+        scroll.setAutoFillBackground(False)
+        content = qt.QFrame()
+        cm = qt.QVBoxLayout(content)
+        cm.setContentsMargins(0, 0, 0, 4)
+        cm.setSpacing(10)
+
+        def _section(text):
+            lab = qt.QLabel(text)
+            lab.setObjectName("sectionTitle")
+            cm.addWidget(lab)
+
+        _section("第一步 · 设置")
+        self._connectCard = self._build_connect_card(1)
+        self._configCard = self._build_config_card(2)
+        cm.addWidget(self._connectCard)
+        cm.addWidget(self._configCard)
+
+        _section("第二步 · 标注工作流")
+        self._importCard = self._build_import_card(3)
+        self._roiCard = self._build_roi_card(4)
+        self._predictCard = self._build_predict_card(5)
+        self._correctCard = self._build_correct_card(6)
+        self._qualityCard = self._build_quality_card(7)
+        self._exportCard = self._build_export_card(8)
+        cm.addWidget(self._importCard)
+        cm.addWidget(self._roiCard)
+        cm.addWidget(self._predictCard)
+        cm.addWidget(self._correctCard)
+        cm.addWidget(self._qualityCard)
+        cm.addWidget(self._exportCard)
+
+        cm.addStretch(1)
+
+        scroll.setWidget(content)
+        m.addWidget(scroll, 1)
 
     # ---------- 各卡片 ----------
 
-    def _build_import_card(self):
-        card, v = _make_card("数据导入")
+    def _build_import_card(self, step=None):
+        card, v = _make_card("数据导入", step)
         line = qt.QHBoxLayout()
         self.pathEdit = qt.QLineEdit()
         self.pathEdit.setPlaceholderText("选择牙科 CBCT 影像（.nii / .nii.gz / .nrrd）")
@@ -204,8 +331,8 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         v.addWidget(self.infoLabel)
         return card
 
-    def _build_roi_card(self):
-        card, v = _make_card("ROI 选择")
+    def _build_roi_card(self, step=None):
+        card, v = _make_card("ROI 选择", step)
         hint = qt.QLabel("新建 ROI 后，在切片视图拖拽框体框住要分割的牙弓区域；再点\"读取 ROI\"。")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -231,8 +358,8 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         v.addWidget(self.roiInfoLabel)
         return card
 
-    def _build_connect_card(self):
-        card, v = _make_card("服务连接")
+    def _build_connect_card(self, step=None):
+        card, v = _make_card("服务连接", step)
         row = qt.QHBoxLayout()
         row.addWidget(qt.QLabel("服务地址"))
         self.addressEdit = qt.QLineEdit("http://127.0.0.1:8000/api/v1")
@@ -252,8 +379,8 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         v.addLayout(btns)
         return card
 
-    def _build_config_card(self):
-        card, v = _make_card("模型与配置")
+    def _build_config_card(self, step=None):
+        card, v = _make_card("模型与配置", step)
         form = qt.QFormLayout()
         self.modelCombo = qt.QComboBox()
         self.modeCombo = qt.QComboBox()
@@ -271,8 +398,8 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         v.addWidget(self.loadConfigBtn)
         return card
 
-    def _build_predict_card(self):
-        card, v = _make_card("AI 分割")
+    def _build_predict_card(self, step=None):
+        card, v = _make_card("AI 分割", step)
         hint = qt.QLabel("读取 ROI 坐标后，可先让 Agent 推荐推理模式，"
                          "再点击\"开始分割\"进行 AI 初分割。")
         hint.setObjectName("hint")
@@ -294,8 +421,8 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         v.addWidget(self.maskLabel)
         return card
 
-    def _build_correct_card(self):
-        card, v = _make_card("人工修正")
+    def _build_correct_card(self, step=None):
+        card, v = _make_card("人工修正", step)
         hint = qt.QLabel("\"打开编辑器\"将 AI 结果转成可编辑的分割；"
                          "用 Slicer 画笔工具修正牙齿边界后，点\"读取修正结果\"。")
         hint.setObjectName("hint")
@@ -318,8 +445,8 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         v.addWidget(self.correctLabel)
         return card
 
-    def _build_quality_card(self):
-        card, v = _make_card("标签质检")
+    def _build_quality_card(self, step=None):
+        card, v = _make_card("标签质检", step)
         hint = qt.QLabel("对当前结果（AI 分割或人工修正）做质量检查，"
                          "检查空标签、重复编号、连通域等。")
         hint.setObjectName("hint")
@@ -334,8 +461,8 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         v.addWidget(self.qualityLabel)
         return card
 
-    def _build_export_card(self):
-        card, v = _make_card("结果导出")
+    def _build_export_card(self, step=None):
+        card, v = _make_card("结果导出", step)
         hint = qt.QLabel("把当前标注结果导出为可供模型训练使用的数据包。")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -349,32 +476,19 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         v.addWidget(self.exportLabel)
         return card
 
-    def _build_status_card(self):
-        card, v = _make_card("运行状态")
-        self.statusLabel = qt.QLabel("尚未连接服务端")
-        self.statusLabel.setObjectName("hint")
-        self.statusLabel.setWordWrap(True)
-        v.addWidget(self.statusLabel)
-        self.progressBar = qt.QProgressBar()
-        self.progressBar.setRange(0, 0)   # busy 动画模式
-        self.progressBar.setVisible(False)
-        self.progressBar.setMaximumHeight(8)
-        v.addWidget(self.progressBar)
-
+    def _build_log_card(self):
+        card, v = _make_card("日志")
         logHeader = qt.QHBoxLayout()
-        logTitle = qt.QLabel("日志")
-        logTitle.setObjectName("cardTitle")
         self.clearLogBtn = qt.QPushButton("清空日志")
         self.clearLogBtn.setObjectName("ghost")
         self.clearLogBtn.clicked.connect(self._on_clear_log)
-        logHeader.addWidget(logTitle)
         logHeader.addStretch(1)
         logHeader.addWidget(self.clearLogBtn)
         v.addLayout(logHeader)
 
         self.logEdit = qt.QPlainTextEdit()
         self.logEdit.setReadOnly(True)
-        self.logEdit.setMaximumHeight(120)
+        self.logEdit.setMaximumHeight(150)
         v.addWidget(self.logEdit)
         return card
 
@@ -409,6 +523,15 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             self.progressBar.setVisible(True)
         else:
             self.progressBar.setVisible(False)
+
+    def _set_card_dot(self, card, color=None):
+        """更新卡片标题右侧的状态圆点（就近反馈）。color 为空则恢复灰点。"""
+        meta = _CARD_META.get(card)
+        if not meta:
+            return
+        dot = meta["dot"]
+        dot.setText("●" if color else "○")
+        dot.setStyleSheet(f"QLabel#cardDot{{color:{color or _TEXT_DIM};}}")
 
     # ---------- 槽函数：ROI ----------
 
@@ -485,6 +608,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         )
         self._set_status("ROI 已读取，坐标格式为 IJK（供后端 /predict 使用）", _OK)
         self._log(f"ROI IJK: start={start}, size={size}")
+        self._set_card_dot(self._roiCard, _OK)
 
     def _read_roi_ijk(self):
         """把 ROI 框转换为体素坐标 start/size（RAS→IJK）。"""
@@ -548,6 +672,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             _OK,
         )
         self._log(f"影像加载成功: dims={dims}, spacing={spacing}")
+        self._set_card_dot(self._importCard, _OK)
 
     # ---------- 槽函数：服务 ----------
 
@@ -561,6 +686,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             self.connStatusLabel.setText("● 连接失败")
             self.connStatusLabel.setStyleSheet(
                 f"color:{_DANGER}; font-weight:bold;")
+            self._set_card_dot(self._connectCard, _DANGER)
             self._set_status(f"连接失败: [{e.error_code}]", _DANGER)
             self._log(f"连接失败: {e.error_code} | {e.message}")
             return
@@ -570,6 +696,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.connStatusLabel.setText("● 已连接")
         self.connStatusLabel.setStyleSheet(
             f"color:{_OK}; font-weight:bold;")
+        self._set_card_dot(self._connectCard, _OK)
         self._set_status(
             f"已连接 · 设备 {device} · 模型 {'已加载' if model_state else '未加载'}",
             _OK if model_state else None,
@@ -608,14 +735,16 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             f"配置已加载: {model_count} 个模型, "
             f"{template_count} 个标签模板", _OK,
         )
+        self._set_card_dot(self._configCard, _OK)
 
     # ---------- 槽函数：AI 分割 ----------
 
     def _ensure_case_id(self):
         """确保已有 case_id，没有再调用 /cases 创建。"""
         if not self.case_id:
+            template_id = self.templateCombo.currentText or _DEFAULT_TEMPLATE_ID
             case = self.api.create_case(
-                self.image_path, "nii", "teeth-16", "operator-b")
+                self.image_path, "nii", template_id, "operator-b")
             self.case_id = case.get("case_id")
         return self.case_id
 
@@ -630,7 +759,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             self._log("尚未读取 ROI 坐标，请先框选并读取 ROI")
             return
         roi = {"start": self.roi_ijk_start, "size": self.roi_ijk_size}
-        target = self.templateCombo.currentText or "teeth"
+        target = self.templateCombo.currentText or _DEFAULT_TEMPLATE_ID
         self._log(f"请求推荐模式: roi_size={roi['size']}, target={target}")
         try:
             self._ensure_case_id()
@@ -710,6 +839,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             self.maskLabel.setText(
                 f"AI 分割结果已载入: {os.path.basename(mask_path)}")
             self._set_status("AI 分割完成，结果已加载显示", _OK)
+            self._set_card_dot(self._predictCard, _OK)
         except Exception as e:
             self.maskLabel.setText(f"加载 mask 失败: {e}")
             self._set_status("加载 mask 失败", "#d64545")
@@ -755,6 +885,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             "编辑器已打开（AI_Seg_Edit）。用画笔工具修正牙齿边界，"
             "完成后点\"读取修正结果\"")
         self._set_status("已打开分割编辑器，请手工修正", _OK)
+        self._set_card_dot(self._correctCard, _OK)
 
     def on_read_result(self):
         """把修正后的 Segmentation 导出回 LabelMap，供后续质检/导出。"""
@@ -819,7 +950,9 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self._set_busy(True, "正在进行标签质检...")
         self._log(f"质检标签: {label_path}")
         try:
-            result = self.api.check_label(case_id, label_path, "teeth-16")
+            result = self.api.check_label(
+            case_id, label_path,
+            self.templateCombo.currentText or _DEFAULT_TEMPLATE_ID)
         except ApiError as e:
             self.qualityBtn.setEnabled(True)
             self._set_busy(False)
@@ -841,6 +974,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         passed = result.get("passed", len(issues) == 0)
         self.qualityLabel.setStyleSheet(
             f"QLabel{{color:{_OK if passed else _DANGER};}}")
+        self._set_card_dot(self._qualityCard, _OK if passed else _DANGER)
         if passed:
             self.qualityLabel.setText(
                 f"质检通过：共检查 {len(result.get('checked', []))} 项，无问题")
@@ -896,6 +1030,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.exportLabel.setText(
             f"已导出 {len(files)} 个文件 → {export_dir}")
         self._set_status("导出完成", _OK)
+        self._set_card_dot(self._exportCard, _OK)
         self.last_export_dir = export_dir
         for f in files:
             self._log(f"已生成: {f}")

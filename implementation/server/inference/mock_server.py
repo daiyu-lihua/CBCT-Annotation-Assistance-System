@@ -12,6 +12,7 @@ B 组前端联调用：实现与「统一接口协议」一致的全部 9 个后
 """
 
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -26,11 +27,55 @@ BASE_PATH = "/api/v1"
 # 输出目录：项目仓库 data/outputs/mock_masks（不入库，按 .gitignore 排除）
 OUTPUT_DIR = Path(__file__).resolve().parents[3] / "data" / "outputs" / "mock_masks"
 
+# 新的 96 类 ITKSNAP 稠密标签规范（队友提供，已收录进项目 assets）
+LABEL_SPEC_FILE = Path(__file__).resolve().parent / "assets" / "label_spec_96.txt"
+# 统一模板 ID：1xx-6xx 共 96 类（上/下颌 × 牙体/牙髓/种植体 × 16 位置）
+LABEL_TEMPLATE_ID = "teeth-dense-96"
+
 app = FastAPI(title="CBCT Mock Server", version="0.1.0")
 
 
 def _log(event: str, payload: dict):
     print(f"[mock-server] {event}: {payload}", flush=True)
+
+
+# ---------- 96 类标签规范 ----------
+
+def _parse_label_spec(path: Path):
+    """解析 ITKSNAP 标签描述文件，返回 [{id, code, category, position, name, color}]。
+
+    文件行形如："    1    84  130  242     1.00  1  1    "101_UpperTooth_Pos01""
+    LABEL 语义码：1xx=上颌牙体 2xx=上颌牙髓 3xx=上颌种植体
+                4xx=下颌牙体 5xx=下颌牙髓 6xx=下颌种植体；xx=01-16 位置号
+    IDX 稠密 1-96，供模型训练使用；标注语义以 LABEL 语义码为准。
+    """
+    labels = []
+    if not path.exists():
+        return labels
+    line_re = re.compile(r'^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+[\d.]+\s+\d+\s+\d+\s+"(.*)"\s*$')
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        m = line_re.match(raw)
+        if not m or m.group(1) == "0":
+            continue  # 跳过表头 / 注释 / Clear Label(0)
+        idx = int(m.group(1))
+        color = [int(m.group(2)), int(m.group(3)), int(m.group(4))]
+        name = m.group(5)
+        parts = name.split("_")
+        code = parts[0]
+        category = parts[1] if len(parts) > 1 else ""
+        position = parts[2] if len(parts) > 2 else ""
+        labels.append({
+            "id": idx,
+            "code": code,
+            "category": category,
+            "position": position,
+            "name": name,
+            "color": color,
+        })
+    return labels
+
+
+LABEL_SPEC = _parse_label_spec(LABEL_SPEC_FILE)
 
 
 # ---------- 请求体 ----------
@@ -129,8 +174,12 @@ def config():
             {"id": "fine", "name": "精细模式"},
         ],
         label_templates=[
-            {"template_id": "teeth-16", "name": "16 颗牙模板"},
-            {"template_id": "teeth-32", "name": "32 颗牙模板"},
+            {
+                "template_id": LABEL_TEMPLATE_ID,
+                "name": "96 类牙体稠密标签 (ITKSNAP)",
+                "label_count": len(LABEL_SPEC),
+                "labels": LABEL_SPEC,
+            },
         ],
     )
 

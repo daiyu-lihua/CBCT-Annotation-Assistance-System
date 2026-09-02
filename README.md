@@ -28,8 +28,8 @@ CBCT 数据导入
 │   ├── plugin/              3D Slicer 插件本体 (CBCTAnnotator.py, lib/ApiClient.py)
 │   └── launcher/            启动入口：一键启动服务、环境说明
 ├── implementation/          实现层：后台服务、模型接入、Agent
-│   ├── server/inference/    本地推理服务端（现为 mock 假后端, FastAPI）
-│   ├── model/               模型接入（预留，接 A 组模型）
+│   ├── server/inference/    本地推理服务端（mock 假后端 + ToothSeg 真实推理, FastAPI）
+│   ├── model/               模型接入（ToothSeg 双分支模型与权重已接入）
 │   └── agent/               Agent 调度（预留）
 ├── docs/                    各类文档（项目介绍 / 使用指南 / 接口方案）
 ├── data/                    数据层：inputs 原始数据、outputs 运行产物（均不入库）
@@ -50,9 +50,13 @@ CBCT 数据导入
 建议内容：
 
 - 项目架构说明；
+
 - 使用指南与用户手册；
+
 - API 接口协议；
+
 - 标签规范；
+
 - 阶段总结、软著、专利、结题材料草稿。
 
 当前已有子目录：
@@ -78,9 +82,13 @@ docs/meeting_notes/    组会记录、任务分配、阶段复盘
 建议内容：
 
 - 标签编号配置；
+
 - 模型配置；
+
 - 推理模式配置；
+
 - 服务端配置；
+
 - 数据路径配置。
 
 子目录说明：
@@ -115,19 +123,26 @@ data/splits/           训练集、验证集、测试集划分文件
 data/demo_cases/       脱敏演示病例或示例数据说明
 ```
 
-## data_tools/
+## data\_tools/
 
 用于存放数据处理工具脚本。
 
 建议内容：
 
 - DICOM 转 nii.gz；
+
 - nrrd、nii.gz、LabelMap 格式转换；
+
 - 图像重采样；
+
 - 灰度归一化；
+
 - ROI 裁剪；
+
 - 数据集划分；
+
 - 标签文件检查；
+
 - 数据统计。
 
 ## training/
@@ -137,12 +152,19 @@ data/demo_cases/       脱敏演示病例或示例数据说明
 建议内容：
 
 - PyTorch、MONAI 或 nnU-Net 训练代码；
+
 - 数据集读取代码；
+
 - 模型结构；
+
 - 损失函数；
+
 - 评价指标；
+
 - 半监督训练流程；
+
 - 伪标签生成与筛选；
+
 - 模型导出代码。
 
 子目录说明：
@@ -159,9 +181,34 @@ training/export/           PyTorch 权重导出、ONNX 导出
 
 ## implementation/server/inference/
 
-用于存放本地 AI 推理服务端代码（当前为 mock 假后端，FastAPI 实现）。
+用于存放本地 AI 推理服务端代码（FastAPI 实现，统一接口协议 v1）。
 
-服务端负责接收 3D Slicer 或 Agent 的请求，完成图像读取、推理调用、结果返回；后续接入真实模型后，在此增加预处理与后处理。当前 `/status`、`/config`、`/predict`、`/check_label`、`/export` 等 9 个接口已就绪。
+服务端负责接收 3D Slicer 或 Agent 的请求，完成图像读取、推理调用、结果返回。当前有两个实现（9 个接口均就绪）：
+
+```text
+mock_server.py      本地假后端（B 组前端联调用，返回 ROI 内实心立方体假 mask）
+toothseg_server.py  ToothSeg 真实推理服务端（调用 implementation/model/toothseg）
+```
+
+**ToothSeg 真实推理服务端**启动方式（在 nninteractive 环境中）：
+
+```powershell
+E:\miniconda3\envs\nninteractive\python.exe implementation\server\inference\toothseg_server.py
+```
+
+或双击 `user\launcher\一键启动ToothSeg服务.bat`。地址同为 `http://127.0.0.1:8000/api/v1`（mock 与 ToothSeg 服务二选一运行）。
+
+要点：
+
+- `/predict` 为同步长请求（完整双分支推理约 30-90 分钟），插件侧 `ApiClient.predict()` 读超时为 None 且在子线程调用；
+
+- 同一时刻仅允许一个推理任务（GPU 独占），重复请求返回 `PREDICT_IN_PROGRESS`；
+
+- 推理在独立子进程运行，本服务进程不初始化 CUDA；
+
+- 输入要求 NIfTI（.nii/.nii.gz），服务端自动复制并补 `_0000` 后缀；ROI 记录不裁剪（全图推理保证牙位编号正确）；
+
+- 产物：`data/outputs/toothseg/jobs/<pred_id>/output/final_prediction/*.nii.gz`（FDI 11-48 牙位标签），任务日志 `server_predict.log`、元信息 `job_meta.json`。
 
 规划子目录：
 
@@ -175,9 +222,20 @@ implementation/server/inference/postprocess/  连通域分析、孔洞填补、�
 
 ## implementation/model/
 
-用于存放模型接入代码（预留，待 A 组模型到位后接入）。
+用于存放模型接入代码。当前已接入 ToothSeg 双分支牙齿分割模型（2026-09 交接版）。
 
-真实牙齿分割模型推理脚本、权重管理在此对接 `server/inference` 的 `/predict` 实现。权重放 `model/weights/`（已被 .gitignore 排除，否则不入库）。
+```text
+implementation/model/toothseg/                  ToothSeg 推理代码（自包含）
+  ├── run_toothseg.py                           参数化端到端推理入口（full/sem/inst）
+  ├── memsafe_inference.py                      MemSafe 低显存滑窗推理器
+  ├── postprocess_predictions/                  后处理：实例化/重采样/牙位编号
+  └── toothseg/                                 迷你工具包（copy_geometry 等）
+implementation/model/weights/                   nnU-Net 权重（.gitignore 排除，不入库）
+  ├── Dataset121_ToothFairy2_Teeth/...          语义分支（33 类 @0.3mm）
+  └── Dataset123_ToothFairy2fixed_teeth_spacing02_brd3px/...  实例分支（border-core @0.2mm）
+```
+
+环境要求：Conda `nninteractive` 环境（torch 2.8.0+cu128），环境变量 `PYTORCH_CUDA_ALLOC_CONF` 由 run\_toothseg.py 自动设置；`TOOTHSEG_HOME` / `TOOTHSEG_NNUNET_RESULTS` 可覆盖默认路径定位。权重放 `model/weights/`（已被 .gitignore 排除，不入库）。
 
 ## user/plugin/
 
@@ -205,20 +263,28 @@ agent/rules/     流程规则、推理模式推荐规则、标签检查规则
 agent/logs/      Agent 任务日志、用户操作记录、经验候选记录
 ```
 
-## quality_control/
+## quality\_control/
 
 用于存放标签质量检查相关代码。
 
 建议内容：
 
 - 空标签检查；
+
 - 重复编号检查；
+
 - 标签编号范围检查；
+
 - 连通域检查；
+
 - 异常体积检查；
+
 - 小碎片检查；
+
 - 左右侧或上下颌混淆检查；
+
 - 导出文件可读性检查；
+
 - 质量报告生成。
 
 ## deployment/
@@ -240,10 +306,15 @@ deployment/ascend/    昇腾等国产化算力平台适配资料和脚本
 建议内容：
 
 - 数据预处理测试；
+
 - API 接口测试；
+
 - 推理服务测试；
+
 - 标签质检测试；
+
 - 3D Slicer 与后端联调测试；
+
 - 完整流程集成测试。
 
 子目录说明：
@@ -260,10 +331,15 @@ tests/integration/  多模块联调测试，例如 Slicer -> Agent -> 推理服�
 建议内容：
 
 - 启动本地推理服务；
+
 - 初始化目录；
+
 - 批量转换数据；
+
 - 批量生成报告；
+
 - 清理临时文件；
+
 - 运行 Demo。
 
 ## assets/
@@ -273,10 +349,15 @@ tests/integration/  多模块联调测试，例如 Slicer -> Agent -> 推理服�
 建议内容：
 
 - 项目 Logo；
+
 - 系统截图；
+
 - 流程图；
+
 - 架构图；
+
 - 演示素材；
+
 - 图标资源。
 
 ## outputs/
@@ -705,7 +786,12 @@ EXPORT_FAILED         结果导出失败
 ## 注意事项
 
 - 不要将真实患者原始 CBCT 数据上传到公开仓库。
+
 - 不要把大体积模型权重直接提交到 GitHub，必要时使用本地共享盘、网盘或 Git LFS。
+
 - 修改接口格式前必须通知两组成员。
+
 - 每个模块的输入、输出、文件路径和错误信息都应尽量清晰。
+
 - 优先跑通完整闭环，再逐步提高模型精度和 Agent 智能程度。
+

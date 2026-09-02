@@ -183,7 +183,8 @@ cython_debug/
 # CBCT 标注系统：数据层与模型权重（原始输入脱敏大文件、运行产物、权重均不入库）
 data/inputs/
 data/outputs/
-model/weights/
+implementation/model/weights/
+implementation/model/work/
 *.nii
 *.nii.gz
 *.nrrd

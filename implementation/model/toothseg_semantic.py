@@ -99,6 +99,8 @@ def _candidate_nnunet_results_roots() -> list[Path]:
         DEFAULT_NNUNET_RESULTS,
         TOOTHSEG_ROOT / "nnUNet_results",
         PROJECT_ROOT / "ToothSeg" / "nnUNet_results",
+        PROJECT_ROOT.parent / "ToothSeg",
+        PROJECT_ROOT.parent / "ToothSeg" / "nnUNet_results",
         PROJECT_ROOT.parent / "model_weights",
         PROJECT_ROOT.parent / "nnUNet_results",
         Path("D:/ToothSegWork/nnUNet_results"),

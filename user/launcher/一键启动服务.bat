@@ -3,7 +3,8 @@ setlocal
 
 cd /d "%~dp0\..\.."
 
-set "PYTHON_EXE=D:\Anaconda\envs\nnInteractive\python.exe"
+set "PYTHON_EXE=E:\miniconda3\envs\nninteractive\python.exe"
+set "PATH=E:\miniconda3\envs\nninteractive\Scripts;E:\miniconda3\envs\nninteractive;%PATH%"
 set "SERVER_SCRIPT=implementation\server\inference\toothseg_server.py"
 set "SERVER_URL=http://127.0.0.1:8000/api/v1"
 

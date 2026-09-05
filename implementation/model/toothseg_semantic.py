@@ -747,9 +747,10 @@ def run_toothseg_semantic(
             "MKL_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
-            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         }
     )
+    if os.name != "nt":
+        env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     cmd = [
         _nnunet_predict_exe(),
@@ -771,10 +772,16 @@ def run_toothseg_semantic(
         device,
         "--disable_tta",
         "-npp",
-        "1",
+        "0",
         "-nps",
-        "1",
+        "0",
     ]
+
+    # npp/nps 传 0 让 nnUNetv2_predict 进入官方 sequential 模式(主进程内完成
+    # 预处理与分割导出)。Windows 上 spawn Pool 需要把整卷 logits 通过匿名管道
+    # 序列化传给导出 worker, 大体积数组会触发 OSError [WinError 87](管道
+    # overlapped WriteFile 参数错误), 进程直接崩溃; 单图场景 sequential 与
+    # 1-worker 并行耗时基本相同。
 
     semantic_dir.mkdir(parents=True, exist_ok=True)
     ensure_not_cancelled()

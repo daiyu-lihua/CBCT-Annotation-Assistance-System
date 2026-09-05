@@ -49,9 +49,13 @@ def _default_runtime_root() -> Path:
     configured = os.environ.get("CBCT_TOOTHSEG_RUNTIME")
     if configured:
         return Path(configured)
+    if _path_is_ascii(PROJECT_ROOT):
+        return PROJECT_ROOT / "_runtime"
     if _path_is_ascii(TOOTHSEG_ROOT):
         return TOOTHSEG_ROOT / "_runtime"
-    return ASCII_TOOTHSEG_ROOT / "_runtime"
+    anchor = PROJECT_ROOT.anchor or "C:/"
+    return Path(f"{anchor}/ToothSegWork/_runtime")
+
 
 
 RUNTIME_ROOT = _default_runtime_root()
@@ -86,50 +90,6 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
         seen.add(key)
         result.append(path)
     return result
-
-
-def _candidate_nnunet_results_roots() -> list[Path]:
-    raw_candidates = []
-    for env_name in ("nnUNet_results", "TOOTHSEG_NNUNET_RESULTS", "CBCT_NNUNET_RESULTS"):
-        value = os.environ.get(env_name)
-        if value:
-            raw_candidates.append(Path(value))
-
-    raw_candidates.extend([
-        DEFAULT_NNUNET_RESULTS,
-        TOOTHSEG_ROOT / "nnUNet_results",
-        PROJECT_ROOT / "ToothSeg" / "nnUNet_results",
-        PROJECT_ROOT.parent / "ToothSeg",
-        PROJECT_ROOT.parent / "ToothSeg" / "nnUNet_results",
-        PROJECT_ROOT.parent / "model_weights",
-        PROJECT_ROOT.parent / "nnUNet_results",
-        Path("D:/ToothSegWork/nnUNet_results"),
-    ])
-
-    expanded = []
-    for candidate in raw_candidates:
-        expanded.append(candidate)
-        if candidate.name.lower() != "nnunet_results":
-            expanded.append(candidate / "nnUNet_results")
-    return _unique_paths(expanded)
-
-
-def _resolve_nnunet_results() -> Path:
-    candidates = _candidate_nnunet_results_roots()
-    for candidate in candidates:
-        if (candidate / SEMANTIC_CHECKPOINT_RELATIVE).exists():
-            return candidate
-    env_value = (
-        os.environ.get("nnUNet_results")
-        or os.environ.get("TOOTHSEG_NNUNET_RESULTS")
-        or os.environ.get("CBCT_NNUNET_RESULTS")
-    )
-    if env_value:
-        return Path(env_value)
-    return DEFAULT_NNUNET_RESULTS
-
-
-NNUNET_RESULTS = _resolve_nnunet_results()
 
 
 def _safe_name(value: str) -> str:
@@ -174,9 +134,126 @@ def _nnunet_predict_exe() -> str:
     raise RuntimeError("未找到 nnUNetv2_predict，请使用包含 nnU-Net v2 的 nnInteractive 环境启动服务。")
 
 
+_CUSTOM_MODEL_ROOT: Path | None = None
+
+
+
+def set_custom_model_root(path: str | Path | None) -> None:
+    """允许前端或调用者动态指定模型权重根目录。"""
+    global _CUSTOM_MODEL_ROOT, NNUNET_RESULTS
+    if path:
+        _CUSTOM_MODEL_ROOT = Path(path).resolve()
+    else:
+        _CUSTOM_MODEL_ROOT = None
+    NNUNET_RESULTS = _resolve_nnunet_results()
+
+
+def _candidate_nnunet_results_roots() -> list[Path]:
+    raw_candidates = []
+
+    # 1. 优先检查前端/用户自定义设置的目录
+    if _CUSTOM_MODEL_ROOT:
+        raw_candidates.append(_CUSTOM_MODEL_ROOT)
+
+    # 2. 检查环境变量
+    for env_name in ("CUSTOM_MODEL_PATH", "CBCT_MODEL_PATH", "nnUNet_results", "TOOTHSEG_NNUNET_RESULTS", "CBCT_NNUNET_RESULTS"):
+        value = os.environ.get(env_name)
+        if value:
+            raw_candidates.append(Path(value))
+
+    # 3. 最符合用户直觉的第一优先级：项目内的 models/ 目录
+    raw_candidates.extend([
+        PROJECT_ROOT / "models",
+        PROJECT_ROOT / "models" / "ToothSeg",
+        PROJECT_ROOT / "models" / "ToothSeg" / "nnUNet_results",
+        PROJECT_ROOT / "models" / "nnUNet_results",
+    ])
+
+    # 4. 项目内其它预留目录与同级目录探测
+    raw_candidates.extend([
+        DEFAULT_NNUNET_RESULTS,
+        PROJECT_ROOT / "ToothSeg" / "nnUNet_results",
+        PROJECT_ROOT / "ToothSeg",
+        PROJECT_ROOT.parent / "ToothSeg",
+        PROJECT_ROOT.parent / "ToothSeg" / "nnUNet_results",
+        PROJECT_ROOT.parent / "model_weights",
+        PROJECT_ROOT.parent / "nnUNet_results",
+        TOOTHSEG_ROOT / "nnUNet_results",
+    ])
+
+    # 5. 动态检测当前工作盘符下的 ToothSegWork，避免死绑 D 盘
+    anchor = PROJECT_ROOT.anchor or "C:/"
+    raw_candidates.append(Path(f"{anchor}/ToothSegWork/nnUNet_results"))
+    raw_candidates.append(Path(f"{anchor}/ToothSegWork"))
+    if anchor.upper().startswith("C"):
+        raw_candidates.append(Path("D:/ToothSegWork/nnUNet_results"))
+
+    expanded = []
+    for candidate in raw_candidates:
+        expanded.append(candidate)
+        if candidate.name.lower() != "nnunet_results":
+            expanded.append(candidate / "nnUNet_results")
+    return _unique_paths(expanded)
+
+
+def _fuzzy_find_checkpoint(candidate: Path) -> tuple[Path, Path] | None:
+    """容错深搜：在候选目录下查找 Dataset121 权重文件。
+    
+    哪怕用户解压时多包了同名文件夹或解压在子目录，也能自动识别。
+    返回: (nnunet_results_root, checkpoint_path) 或 None
+    """
+    if not candidate.exists() or not candidate.is_dir():
+        return None
+
+    # 1. 快速精确探测
+    exact = candidate / SEMANTIC_CHECKPOINT_RELATIVE
+    if exact.is_file():
+        return candidate, exact
+
+    # 2. 检查 candidate 本身是否就是 Dataset121 目录
+    if candidate.name.lower().startswith("dataset121"):
+        exact_sub = candidate / f"{SEMANTIC_TRAINER}__nnUNetPlans__{SEMANTIC_CONFIGURATION}" / f"fold_{SEMANTIC_FOLD}" / SEMANTIC_CHECKPOINT
+        if exact_sub.is_file():
+            return candidate.parent, exact_sub
+
+    # 3. 递归探测（向下最多探测 4 层，寻找 checkpoint_final.pth）
+    try:
+        for pth in candidate.glob("*/**/checkpoint_final.pth"):
+            pth_str = str(pth).replace("\\", "/").lower()
+            if "dataset121" in pth_str and f"fold_{SEMANTIC_FOLD}" in pth_str:
+                parts = pth.resolve().parts
+                for i, part in enumerate(parts):
+                    if part.lower().startswith("dataset121"):
+                        return Path(*parts[:i]), pth
+    except Exception:
+        pass
+
+    return None
+
+
+def _resolve_model_paths() -> tuple[Path, Path, bool]:
+    """解析可用的 nnUNet_results 根目录与权重文件路径。"""
+    candidates = _candidate_nnunet_results_roots()
+    for candidate in candidates:
+        match = _fuzzy_find_checkpoint(candidate)
+        if match:
+            return match[0], match[1], True
+
+    # 未找到时给出默认预估路径
+    default_root = PROJECT_ROOT / "models"
+    return default_root, default_root / SEMANTIC_CHECKPOINT_RELATIVE, False
+
+
+def _resolve_nnunet_results() -> Path:
+    root, _, _ = _resolve_model_paths()
+    return root
+
+
+NNUNET_RESULTS = _resolve_nnunet_results()
+
+
 def toothseg_status() -> dict[str, Any]:
-    nnunet_results = _resolve_nnunet_results()
-    checkpoint = nnunet_results / SEMANTIC_CHECKPOINT_RELATIVE
+    nnunet_results, checkpoint_path, checkpoint_exists = _resolve_model_paths()
     try:
         predict_exe = _nnunet_predict_exe()
     except Exception as exc:
@@ -185,17 +262,27 @@ def toothseg_status() -> dict[str, Any]:
     else:
         exe_error = None
 
+    is_available = bool(checkpoint_exists and predict_exe)
+    if is_available:
+        help_msg = "ToothSeg 语义模型与权重均已就绪。"
+    elif not predict_exe:
+        help_msg = "未找到 nnUNetv2_predict，请使用包含 nnU-Net v2 的 Conda 环境启动。"
+    else:
+        help_msg = "未检测到模型权重。请将 ToothSeg 解压至项目的 models/ 目录，或在界面点击【选择模型文件夹】。"
+
     return {
-        "available": bool(checkpoint.exists() and predict_exe),
+        "available": is_available,
         "toothseg_root": str(TOOTHSEG_ROOT),
         "runtime_root": str(RUNTIME_ROOT),
         "nnunet_results": str(nnunet_results),
         "nnunet_results_candidates": [str(p) for p in _candidate_nnunet_results_roots()],
-        "checkpoint_path": str(checkpoint),
-        "checkpoint_exists": checkpoint.exists(),
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_exists": checkpoint_exists,
         "predict_exe": predict_exe,
+        "help_message": help_msg,
         "error": exe_error,
     }
+
 
 
 def _copy_input_to_ascii_workspace(image_path: Path, case_dir: Path) -> Path:

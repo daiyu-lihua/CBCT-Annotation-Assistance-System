@@ -61,19 +61,28 @@ if not "%PYTHON_EXE%"=="python" (
     set "PATH=!PY_DIR!\Scripts;!PY_DIR!;%PATH%"
 )
 
+set "PYTHONIOENCODING=utf-8"
+
+
 echo Server URL:
 echo   %SERVER_URL%
 echo.
 echo Python Environment:
 echo   %PYTHON_EXE%
 echo.
-echo nnUNet_results:
-if defined nnUNet_results (
-  echo   %nnUNet_results%
+
+rem Quick visual check for models
+if exist "models\ToothSeg" (
+    echo [Model Check] :  [OK] Found local model package in models\ToothSeg
+) else if exist "models\Dataset121*" (
+    echo [Model Check] :  [OK] Found local model in models\
+) else if exist "..\ToothSeg" (
+    echo [Model Check] :  [OK] Found local model package in ..\ToothSeg
 ) else (
-  echo   auto-detect in server
+    echo [Model Check] :  [WARNING] No local model in models/ (Server will try auto-detect)
 )
 echo.
+
 echo Close this window or press Ctrl+C to stop the server.
 echo.
 
@@ -85,7 +94,9 @@ if not exist "%SERVER_SCRIPT%" (
   exit /b 1
 )
 
+chcp 65001 >nul
 "%PYTHON_EXE%" "%SERVER_SCRIPT%"
+
 
 if errorlevel 1 (
   echo.

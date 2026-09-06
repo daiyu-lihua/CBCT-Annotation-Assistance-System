@@ -1,0 +1,40 @@
+{
+  "default_profile": "low_vram",
+  "profiles": {
+    "low_vram": {
+      "description": "RTX 4060 Laptop 8GB first-run safe profile. Keep frontend spacing_mm adjustable; constrain the rest of inference.",
+      "engine": "memsafe_subprocess",
+      "device": "cuda",
+      "step_size": 0.75,
+      "disable_tta": true,
+      "npp": 1,
+      "nps": 1,
+      "save_probabilities": false,
+      "save_probability_blocks": false,
+      "torch_alloc_conf": "expandable_segments:True,garbage_collection_threshold:0.5,max_split_size_mb:128",
+      "thread_limits": {
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1"
+      }
+    },
+    "cli_safe": {
+      "description": "Conservative standard nnUNetv2_predict profile. Use only if MemSafe subprocess is unavailable.",
+      "engine": "nnunet_cli",
+      "device": "cuda",
+      "step_size": 0.75,
+      "disable_tta": true,
+      "npp": 1,
+      "nps": 1,
+      "save_probabilities": false,
+      "torch_alloc_conf": "expandable_segments:True,garbage_collection_threshold:0.5,max_split_size_mb:128",
+      "thread_limits": {
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1"
+      }
+    }
+  }
+}

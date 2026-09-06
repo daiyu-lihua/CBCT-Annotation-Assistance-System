@@ -49,7 +49,9 @@ from implementation.model.toothseg_semantic import (  # noqa: E402
     RUNTIME_ROOT,
     delete_reuse_package,
     inspect_reuse_package,
+    list_inference_profiles,
     run_toothseg_semantic,
+    set_custom_model_root,
     stage_image_for_reading,
     toothseg_status,
 )
@@ -234,6 +236,7 @@ class PredictRequest(BaseModel):
     output_dir: Optional[str] = None
     keep_reuse: bool = True
     spacing_mm: Optional[float] = None
+    inference_profile: Optional[str] = None
 
 
 class ReuseRequest(BaseModel):
@@ -241,6 +244,7 @@ class ReuseRequest(BaseModel):
     model_id: str = SEMANTIC_MODEL_ID
     mode: str = "balanced"
     spacing_mm: Optional[float] = None
+    inference_profile: Optional[str] = None
 
 
 class CancelPredictRequest(BaseModel):
@@ -250,6 +254,7 @@ class CancelPredictRequest(BaseModel):
     mode: str = "balanced"
     keep_reuse: bool = True
     spacing_mm: Optional[float] = None
+    inference_profile: Optional[str] = None
 
 
 class CheckLabelRequest(BaseModel):
@@ -275,11 +280,16 @@ class LogRequest(BaseModel):
     payload: dict = {}
 
 
+class SetModelPathRequest(BaseModel):
+    model_path: str
+
+
 # ---------- 1. 服务状态 ----------
 
 @app.get(BASE_PATH + "/status")
 def status():
     toothseg = toothseg_status()
+    inference_profiles = list_inference_profiles()
     return _ok(
         service={"name": "cbct-toothseg-semantic-server", "version": "1.0.0"},
         model={
@@ -293,9 +303,26 @@ def status():
                 [] if toothseg.get("checkpoint_exists")
                 else [toothseg.get("checkpoint_path", str(SEMSEG_CP))]
             ),
+            "help_message": toothseg.get("help_message", ""),
+            "inference_profiles": inference_profiles,
         },
         device=_gpu_info(),
     )
+
+
+@app.post(BASE_PATH + "/model/set_path")
+def set_model_path(req: SetModelPathRequest):
+    try:
+        set_custom_model_root(req.model_path)
+        toothseg = toothseg_status()
+        return _ok(
+            message="模型目录设置成功" if toothseg["checkpoint_exists"] else "已更新模型目录，但未能检测到有效权重",
+            model_path=req.model_path,
+            toothseg=toothseg,
+        )
+    except Exception as exc:
+        return _err("SET_MODEL_PATH_FAILED", f"设置模型目录失败: {exc}")
+
 
 
 @app.get(BASE_PATH + "/predict/progress/{case_id}")
@@ -327,6 +354,7 @@ def cancel_predict(req: CancelPredictRequest):
                 "keep_reuse": bool(req.keep_reuse),
                 "model_id": req.model_id,
                 "mode": req.mode,
+                "inference_profile": req.inference_profile,
             },
         )
         return _ok(
@@ -377,6 +405,7 @@ def config():
             "default": 0.75,
             "note": "前端传入 spacing_mm 时优先使用该值；值越大，显存占用越低，细节越少。",
         },
+        inference_profiles=list_inference_profiles(),
         label_templates=[
             {
                 "template_id": LABEL_TEMPLATE_ID,
@@ -393,7 +422,8 @@ def config():
 @app.post(BASE_PATH + "/reuse/status")
 def reuse_status(req: ReuseRequest):
     try:
-        info = inspect_reuse_package(req.image_path, req.model_id, req.mode, req.spacing_mm)
+        info = inspect_reuse_package(
+            req.image_path, req.model_id, req.mode, req.spacing_mm, req.inference_profile)
     except FileNotFoundError as e:
         return _err("IMAGE_NOT_FOUND", str(e))
     except Exception as e:
@@ -531,6 +561,7 @@ def predict(req: PredictRequest):
             case_id=req.case_id,
             mode=req.mode,
             spacing_mm=req.spacing_mm,
+            inference_profile=req.inference_profile,
             output_dir=req.output_dir,
             device="cuda",
             keep_reuse=req.keep_reuse,
@@ -551,6 +582,8 @@ def predict(req: PredictRequest):
             model_id=SEMANTIC_MODEL_ID,
             mode=req.mode,
             spacing_mm=result.get("spacing_mm"),
+            inference_profile=result.get("inference_profile"),
+            inference_profile_config=result.get("inference_profile_config"),
             work_dir=result.get("work_dir"),
             log_path=result.get("log_path"),
             result_path=result.get("result_path"),
@@ -573,7 +606,7 @@ def predict(req: PredictRequest):
         if keep_reuse_after_cancel:
             try:
                 reuse_action["reuse_status"] = inspect_reuse_package(
-                    req.image_path, model_id, req.mode, req.spacing_mm)
+                    req.image_path, model_id, req.mode, req.spacing_mm, req.inference_profile)
             except Exception as reuse_error:
                 reuse_action["reuse_status_error"] = str(reuse_error)
         else:
@@ -695,9 +728,31 @@ if __name__ == "__main__":
     import uvicorn
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     toothseg = toothseg_status()
-    print(f"CBCT ToothSeg server -> http://127.0.0.1:8000{BASE_PATH}", flush=True)
-    print(f"  模型代码 : {TOOTHSEG_DIR}", flush=True)
-    print(f"  权重目录 : {toothseg.get('nnunet_results')}", flush=True)
-    print(f"  权重状态 : checkpoint_exists={toothseg.get('checkpoint_exists')}", flush=True)
-    print(f"  产物目录 : {JOBS_DIR}", flush=True)
+    gpu = _gpu_info()
+    ckpt_ok = bool(toothseg.get("checkpoint_exists"))
+    predict_ok = bool(toothseg.get("predict_exe"))
+
+    print("\n" + "=" * 68, flush=True)
+    if ckpt_ok and predict_ok:
+        print("  >>> [SUCCESS] 模型权重检测成功！(ToothSeg 语义分割已就绪)", flush=True)
+        print(f"  >>> [WEIGHTS] 权重路径: {toothseg.get('checkpoint_path')}", flush=True)
+        if gpu.get("type") == "cuda":
+            print(f"  >>> [DEVICE ] GPU 加速就绪: {gpu.get('name')} (空闲显存: {gpu.get('memory_free_mb')} MB)", flush=True)
+        else:
+            print("  >>> [DEVICE ] 当前运行于 CPU 模式", flush=True)
+        print("  >>> [READY  ] 状态就绪！可在 3D Slicer 中正常点击【开始分割】", flush=True)
+    elif not ckpt_ok:
+        print("  >>> [FAILED ] 未检测到模型权重文件！", flush=True)
+        print("  >>> [GUIDE  ] 1. 请将 ToothSeg 解压放入项目根目录下的 models/ 文件夹中", flush=True)
+        print("  >>> [GUIDE  ] 2. 或在 3D Slicer 插件界面点击【📁 模型目录】手动指定", flush=True)
+    else:
+        print("  >>> [FAILED ] 未找到 nnUNetv2_predict 推理环境！", flush=True)
+        print("  >>> [GUIDE  ] 请确保使用包含 nnU-Net v2 的 Conda (nninteractive) 环境启动", flush=True)
+
+    print("=" * 68, flush=True)
+    print(f"  服务监听地址 : http://127.0.0.1:8000{BASE_PATH}", flush=True)
+    print(f"  本地运行目录 : {RUNTIME_ROOT}", flush=True)
+    print("=" * 68 + "\n", flush=True)
+
+
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")

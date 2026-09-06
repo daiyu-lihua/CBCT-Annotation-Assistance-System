@@ -56,6 +56,14 @@ class ApiClient:
     def config(self):
         return self._request("GET", "/config")
 
+    def set_model_path(self, model_path: str):
+        return self._request(
+            "POST",
+            "/model/set_path",
+            {"model_path": model_path},
+            timeout=10,
+        )
+
     def create_case(self, image_path, image_format, label_template_id, operator):
         return self._request(
             "POST",

@@ -119,6 +119,37 @@ balanced  0.5mm 降采样，默认推荐
 fine      当前与 0.5mm 语义推理一致，预留未来更高质量配置
 ```
 
+## 低显存推理配置
+
+项目级推理配置位于：
+
+```text
+config/inference_profiles.json
+```
+
+调用逻辑：
+
+```text
+一键启动服务.bat
+  -> 启动 toothseg_server.py
+  -> 前端点击开始分割，请求 /predict
+  -> 后端读取 inference_profiles.json
+  -> 使用 default_profile 生成 nnU-Net 推理命令
+```
+
+当前默认 `low_vram`，用于先在 RTX 4060 Laptop 8GB 上跑通一次：
+
+```text
+engine: memsafe_subprocess
+step_size: 0.75
+disable_tta: true
+npp: 1
+nps: 1
+save_probabilities: false
+```
+
+前端传入的 `spacing_mm` 优先级最高，仍由插件界面的“降采样间距”控制；profile 只控制除 spacing 以外的低显存推理参数。
+
 ## 输出目录
 
 - 输入缓存：默认 `D:\ToothSegWork\_runtime\input_cache\`
@@ -144,4 +175,4 @@ fine      当前与 0.5mm 语义推理一致，预留未来更高质量配置
 - `toothseg-semantic-05mm` 是当前真实模型主流程，只运行语义分割分支，不运行完整双分支。
 - `toothseg-full` 是未来高级模式接口占位，当前选择后会返回“暂未启用”。
 - 不要在本目录存放真实患者 CBCT 原始数据，Demo 数据必须脱敏。
-- 本机 RTX 4060 Laptop 8GB 显存建议默认使用 0.5mm 降采样，不建议直接整图原分辨率推理。
+- 本机 RTX 4060 Laptop 8GB 显存建议先使用 `low_vram` profile，并从 1.0mm 或更大的降采样间距开始验证跑通；稳定后再逐步调回 0.75mm / 0.5mm。

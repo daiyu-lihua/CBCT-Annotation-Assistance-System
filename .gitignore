@@ -1,4 +1,4 @@
-﻿# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
@@ -198,3 +198,5 @@ implementation/model/work/
 *.nhdr
 *.mha
 *.mhd
+models/
+*.pth

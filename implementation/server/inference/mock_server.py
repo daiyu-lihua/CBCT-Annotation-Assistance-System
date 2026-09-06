@@ -35,6 +35,7 @@ from implementation.model.toothseg_semantic import (  # noqa: E402
     RUNTIME_ROOT,
     delete_reuse_package,
     inspect_reuse_package,
+    list_inference_profiles,
     run_toothseg_semantic,
     stage_image_for_reading,
     toothseg_status,
@@ -130,6 +131,7 @@ class PredictRequest(BaseModel):
     output_dir: Optional[str] = None
     keep_reuse: bool = True
     spacing_mm: Optional[float] = None
+    inference_profile: Optional[str] = None
 
 
 class ReuseRequest(BaseModel):
@@ -137,6 +139,7 @@ class ReuseRequest(BaseModel):
     model_id: str = "toothseg-semantic-05mm"
     mode: str = "balanced"
     spacing_mm: Optional[float] = None
+    inference_profile: Optional[str] = None
 
 
 class CancelPredictRequest(BaseModel):
@@ -146,6 +149,7 @@ class CancelPredictRequest(BaseModel):
     mode: str = "balanced"
     keep_reuse: bool = True
     spacing_mm: Optional[float] = None
+    inference_profile: Optional[str] = None
 
 
 class CheckLabelRequest(BaseModel):
@@ -308,7 +312,8 @@ def cancel_predict(req: CancelPredictRequest):
 @app.post(BASE_PATH + "/reuse/status")
 def reuse_status(req: ReuseRequest):
     try:
-        info = inspect_reuse_package(req.image_path, req.model_id, req.mode, req.spacing_mm)
+        info = inspect_reuse_package(
+            req.image_path, req.model_id, req.mode, req.spacing_mm, req.inference_profile)
     except FileNotFoundError as e:
         return _err("FILE_NOT_FOUND", str(e))
     except Exception as e:
@@ -348,6 +353,7 @@ def config():
             "default": 0.75,
             "note": "mock 服务接收该参数但不真正降采样；真实 ToothSeg 服务会使用它。",
         },
+        inference_profiles=list_inference_profiles(),
         label_templates=[
             {
                 "template_id": LABEL_TEMPLATE_ID,
@@ -439,6 +445,7 @@ def predict(req: PredictRequest):
                 case_id=req.case_id,
                 mode=req.mode,
                 spacing_mm=req.spacing_mm,
+                inference_profile=req.inference_profile,
                 output_dir=req.output_dir,
                 device="cuda",
                 keep_reuse=req.keep_reuse,
@@ -454,7 +461,7 @@ def predict(req: PredictRequest):
             if keep_reuse_after_cancel:
                 try:
                     reuse_action["reuse_status"] = inspect_reuse_package(
-                        req.image_path, req.model_id, req.mode, req.spacing_mm)
+                        req.image_path, req.model_id, req.mode, req.spacing_mm, req.inference_profile)
                 except Exception as reuse_error:
                     reuse_action["reuse_status_error"] = str(reuse_error)
             else:
@@ -478,6 +485,8 @@ def predict(req: PredictRequest):
             model_id=req.model_id,
             mode=req.mode,
             spacing_mm=result.get("spacing_mm"),
+            inference_profile=result.get("inference_profile"),
+            inference_profile_config=result.get("inference_profile_config"),
             work_dir=result.get("work_dir"),
             log_path=result.get("log_path"),
             mask_info=result.get("mask_info"),

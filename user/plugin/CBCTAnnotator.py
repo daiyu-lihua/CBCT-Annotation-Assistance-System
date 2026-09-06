@@ -282,6 +282,18 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         state_layout.addWidget(self.modelStatusLabel)
         layout.addWidget(state_box)
 
+        model_dir_row = qt.QHBoxLayout()
+        model_dir_row.setSpacing(6)
+        self.chooseModelDirBtn = _button("📁 模型目录", "ghost", 85)
+        self.chooseModelDirBtn.setToolTip("点击选择本地已解压的模型权重目录（如 models/ 或 ToothSeg）")
+        self.chooseModelDirBtn.clicked.connect(self._on_choose_model_dir)
+        self.modelDirLabel = qt.QLabel("模型: 自动检测中")
+        self.modelDirLabel.setObjectName("hint")
+        self.modelDirLabel.setWordWrap(True)
+        model_dir_row.addWidget(self.chooseModelDirBtn)
+        model_dir_row.addWidget(self.modelDirLabel, 1)
+        layout.addLayout(model_dir_row)
+
         form = qt.QFormLayout()
         form.setSpacing(5)
         self.modelCombo = qt.QComboBox()
@@ -300,6 +312,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.modelSupportLabel.setObjectName("hint")
         self.modelSupportLabel.setWordWrap(True)
         layout.addWidget(self.modelSupportLabel)
+
 
         try:
             self.modelCombo.currentIndexChanged.connect(self._on_model_changed)
@@ -706,6 +719,26 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
 
     # ---------- service and config ----------
 
+    def _on_choose_model_dir(self):
+        existing = str(self._settings.value("custom_model_dir", "") or "")
+        chosen = qt.QFileDialog.getExistingDirectory(
+            None,
+            "选择 ToothSeg 模型权重所在目录 (例如 models/ 或解压后的 ToothSeg)",
+            existing,
+            qt.QFileDialog.ShowDirsOnly,
+        )
+        if not chosen:
+            return
+        self._settings.setValue("custom_model_dir", chosen)
+        self._log(f"用户手动指定了模型目录: {chosen}")
+        if self.api:
+            try:
+                res = self.api.set_model_path(chosen)
+                self._log(f"服务端反馈: {res.get('message', '')}")
+            except Exception as e:
+                self._log(f"向服务端推送模型目录失败: {e}")
+        self.on_refresh_service()
+
     def on_refresh_service(self):
         if self.on_connect(auto=False):
             self.on_load_config(auto=False)
@@ -714,12 +747,21 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         url = _line_text(self.addressEdit).strip()
         try:
             self.api = ApiClient(url)
+            saved_dir = str(self._settings.value("custom_model_dir", "") or "")
+            if saved_dir:
+                try:
+                    self.api.set_model_path(saved_dir)
+                except Exception:
+                    pass
             st = self.api.status()
         except ApiError as e:
             self.api = None
             self.connStatusLabel.setText("服务：不可用")
             self.connStatusLabel.setStyleSheet(f"color:{_DANGER}; font-weight:bold;")
             self.modelStatusLabel.setText("模型：未检测")
+            if hasattr(self, "modelDirLabel"):
+                self.modelDirLabel.setText("模型: 服务未连接")
+                self.modelDirLabel.setStyleSheet(f"color:{_TEXT_DIM};")
             self._set_status("未连接到本地服务，请先启动后端服务。", _DANGER)
             self._log(f"服务检测失败: {e.error_code} | {e.message}")
             return False
@@ -727,19 +769,37 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         model = st.get("model", {})
         device = st.get("device", {})
         loaded = bool(model.get("loaded"))
+        toothseg = model.get("toothseg_semantic", {})
+        ckpt_exists = bool(toothseg.get("checkpoint_exists"))
+        ckpt_path = str(toothseg.get("checkpoint_path", ""))
         device_text = device.get("data") or device.get("name") or device.get("type") or "unknown"
         service_name = st.get("service", {}).get("name", "local-service")
         self.connStatusLabel.setText(f"服务：可用 ({service_name})")
         self.connStatusLabel.setStyleSheet(f"color:{_OK}; font-weight:bold;")
         self.modelStatusLabel.setText(
-            f"模型：{'已加载' if loaded else '未完整加载'} · 设备：{device_text}"
+            f"模型：{'已就绪' if loaded else ('权重缺失' if not ckpt_exists else '未完整加载')} · 设备：{device_text}"
         )
         self.modelStatusLabel.setStyleSheet(
             f"color:{_OK if loaded else _WARN};")
-        self._set_status("服务已自动连接，模型配置将自动同步。", _OK)
-        self._log(f"服务连接成功: service={service_name}, device={device_text}, model_loaded={loaded}")
+
+        if hasattr(self, "modelDirLabel"):
+            if ckpt_exists:
+                self.modelDirLabel.setText(f"权重已就绪: {os.path.basename(os.path.dirname(ckpt_path))}")
+                self.modelDirLabel.setStyleSheet(f"color:{_OK}; font-weight:bold;")
+            else:
+                self.modelDirLabel.setText("未找到权重 (点击左侧按钮选择)")
+                self.modelDirLabel.setStyleSheet(f"color:{_WARN}; font-weight:bold;")
+
+        if loaded:
+            self._set_status("服务与模型均已就绪，可开始分割。", _OK)
+        else:
+            hint = toothseg.get("help_message") or "模型尚未就绪，请选择模型权重目录。"
+            self._set_status(hint, _WARN)
+
+        self._log(f"服务连接成功: service={service_name}, device={device_text}, model_loaded={loaded}, ckpt_exists={ckpt_exists}")
         self._save_ui_settings()
         return True
+
 
     def on_load_config(self, auto=False):
         if self.api is None:

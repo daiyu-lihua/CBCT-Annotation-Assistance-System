@@ -13,6 +13,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -49,15 +50,20 @@ def _default_runtime_root() -> Path:
     configured = os.environ.get("CBCT_TOOTHSEG_RUNTIME")
     if configured:
         return Path(configured)
+    if _path_is_ascii(PROJECT_ROOT):
+        return PROJECT_ROOT / "_runtime"
     if _path_is_ascii(TOOTHSEG_ROOT):
         return TOOTHSEG_ROOT / "_runtime"
-    return ASCII_TOOTHSEG_ROOT / "_runtime"
+    anchor = PROJECT_ROOT.anchor or "C:/"
+    return Path(f"{anchor}/ToothSegWork/_runtime")
+
 
 
 RUNTIME_ROOT = _default_runtime_root()
 DEFAULT_NNUNET_RESULTS = MODEL_ROOT / "weights"
 NNUNET_RAW = Path(os.environ.get("nnUNet_raw", str(MODEL_ROOT / "work" / "nnUNet_raw")))
 NNUNET_PREPROCESSED = Path(os.environ.get("nnUNet_preprocessed", str(MODEL_ROOT / "work" / "nnUNet_preprocessed")))
+INFERENCE_PROFILES_FILE = PROJECT_ROOT / "config" / "inference_profiles.json"
 
 SEMANTIC_DATASET_ID = "121"
 SEMANTIC_CONFIGURATION = "3d_fullres_resample_torch_256_bs8_ctnorm"
@@ -75,6 +81,97 @@ TOOTHSEG_TO_PROJECT_DENSE = {
     **{i: i + 32 for i in range(17, 33)},
 }
 
+DEFAULT_INFERENCE_PROFILE = {
+    "description": "Built-in conservative low VRAM profile.",
+    "engine": "memsafe_subprocess",
+    "device": "cuda",
+    "step_size": 0.75,
+    "disable_tta": True,
+    "npp": 1,
+    "nps": 1,
+    "save_probabilities": False,
+    "save_probability_blocks": False,
+    "torch_alloc_conf": "expandable_segments:True,garbage_collection_threshold:0.5,max_split_size_mb:128",
+    "thread_limits": {
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+    },
+}
+
+
+def _load_inference_profiles() -> dict[str, Any]:
+    fallback = {
+        "default_profile": "low_vram",
+        "profiles": {"low_vram": DEFAULT_INFERENCE_PROFILE},
+    }
+    if not INFERENCE_PROFILES_FILE.exists():
+        return fallback
+    try:
+        data = json.loads(INFERENCE_PROFILES_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _log(f"推理配置读取失败，使用内置低显存默认值: {exc}")
+        return fallback
+    if not isinstance(data, dict) or not isinstance(data.get("profiles"), dict):
+        _log("推理配置格式无效，使用内置低显存默认值。")
+        return fallback
+    if "low_vram" not in data["profiles"]:
+        data["profiles"]["low_vram"] = dict(DEFAULT_INFERENCE_PROFILE)
+    data.setdefault("default_profile", "low_vram")
+    return data
+
+
+def _validated_inference_profile(profile_name: str | None = None) -> tuple[str, dict[str, Any]]:
+    data = _load_inference_profiles()
+    requested = profile_name or os.environ.get("CBCT_INFERENCE_PROFILE") or data.get("default_profile") or "low_vram"
+    profiles = data.get("profiles") or {}
+    if requested not in profiles:
+        _log(f"未找到推理 profile={requested}，回退到 low_vram。")
+        requested = "low_vram"
+    profile = {**DEFAULT_INFERENCE_PROFILE, **(profiles.get(requested) or {})}
+
+    engine = str(profile.get("engine", "memsafe_subprocess"))
+    if engine not in {"memsafe_subprocess", "nnunet_cli"}:
+        _log(f"未知推理引擎 {engine}，回退到 memsafe_subprocess。")
+        profile["engine"] = "memsafe_subprocess"
+
+    step_size = float(profile.get("step_size", 0.75))
+    profile["step_size"] = max(0.1, min(1.0, step_size))
+    profile["npp"] = max(1, int(profile.get("npp", 1)))
+    profile["nps"] = max(1, int(profile.get("nps", 1)))
+    profile["disable_tta"] = bool(profile.get("disable_tta", True))
+    profile["save_probabilities"] = bool(profile.get("save_probabilities", False))
+    profile["save_probability_blocks"] = bool(profile.get("save_probability_blocks", False))
+    profile["device"] = str(profile.get("device") or "cuda")
+    if not isinstance(profile.get("thread_limits"), dict):
+        profile["thread_limits"] = DEFAULT_INFERENCE_PROFILE["thread_limits"]
+    return requested, profile
+
+
+def list_inference_profiles() -> dict[str, Any]:
+    data = _load_inference_profiles()
+    default_name, default_profile = _validated_inference_profile(data.get("default_profile"))
+    return {
+        "config_path": str(INFERENCE_PROFILES_FILE),
+        "default_profile": default_name,
+        "profiles": data.get("profiles", {}),
+        "active_profile": default_profile,
+    }
+
+
+def _profile_task_identity(profile_name: str, profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": profile_name,
+        "engine": profile.get("engine"),
+        "step_size": profile.get("step_size"),
+        "disable_tta": profile.get("disable_tta"),
+        "npp": profile.get("npp"),
+        "nps": profile.get("nps"),
+        "save_probabilities": profile.get("save_probabilities"),
+        "save_probability_blocks": profile.get("save_probability_blocks"),
+    }
+
 
 def _unique_paths(paths: list[Path]) -> list[Path]:
     seen = set()
@@ -86,48 +183,6 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
         seen.add(key)
         result.append(path)
     return result
-
-
-def _candidate_nnunet_results_roots() -> list[Path]:
-    raw_candidates = []
-    for env_name in ("nnUNet_results", "TOOTHSEG_NNUNET_RESULTS", "CBCT_NNUNET_RESULTS"):
-        value = os.environ.get(env_name)
-        if value:
-            raw_candidates.append(Path(value))
-
-    raw_candidates.extend([
-        DEFAULT_NNUNET_RESULTS,
-        TOOTHSEG_ROOT / "nnUNet_results",
-        PROJECT_ROOT / "ToothSeg" / "nnUNet_results",
-        PROJECT_ROOT.parent / "model_weights",
-        PROJECT_ROOT.parent / "nnUNet_results",
-        Path("D:/ToothSegWork/nnUNet_results"),
-    ])
-
-    expanded = []
-    for candidate in raw_candidates:
-        expanded.append(candidate)
-        if candidate.name.lower() != "nnunet_results":
-            expanded.append(candidate / "nnUNet_results")
-    return _unique_paths(expanded)
-
-
-def _resolve_nnunet_results() -> Path:
-    candidates = _candidate_nnunet_results_roots()
-    for candidate in candidates:
-        if (candidate / SEMANTIC_CHECKPOINT_RELATIVE).exists():
-            return candidate
-    env_value = (
-        os.environ.get("nnUNet_results")
-        or os.environ.get("TOOTHSEG_NNUNET_RESULTS")
-        or os.environ.get("CBCT_NNUNET_RESULTS")
-    )
-    if env_value:
-        return Path(env_value)
-    return DEFAULT_NNUNET_RESULTS
-
-
-NNUNET_RESULTS = _resolve_nnunet_results()
 
 
 def _safe_name(value: str) -> str:
@@ -172,9 +227,126 @@ def _nnunet_predict_exe() -> str:
     raise RuntimeError("未找到 nnUNetv2_predict，请使用包含 nnU-Net v2 的 nnInteractive 环境启动服务。")
 
 
+_CUSTOM_MODEL_ROOT: Path | None = None
+
+
+
+def set_custom_model_root(path: str | Path | None) -> None:
+    """允许前端或调用者动态指定模型权重根目录。"""
+    global _CUSTOM_MODEL_ROOT, NNUNET_RESULTS
+    if path:
+        _CUSTOM_MODEL_ROOT = Path(path).resolve()
+    else:
+        _CUSTOM_MODEL_ROOT = None
+    NNUNET_RESULTS = _resolve_nnunet_results()
+
+
+def _candidate_nnunet_results_roots() -> list[Path]:
+    raw_candidates = []
+
+    # 1. 优先检查前端/用户自定义设置的目录
+    if _CUSTOM_MODEL_ROOT:
+        raw_candidates.append(_CUSTOM_MODEL_ROOT)
+
+    # 2. 检查环境变量
+    for env_name in ("CUSTOM_MODEL_PATH", "CBCT_MODEL_PATH", "nnUNet_results", "TOOTHSEG_NNUNET_RESULTS", "CBCT_NNUNET_RESULTS"):
+        value = os.environ.get(env_name)
+        if value:
+            raw_candidates.append(Path(value))
+
+    # 3. 最符合用户直觉的第一优先级：项目内的 models/ 目录
+    raw_candidates.extend([
+        PROJECT_ROOT / "models",
+        PROJECT_ROOT / "models" / "ToothSeg",
+        PROJECT_ROOT / "models" / "ToothSeg" / "nnUNet_results",
+        PROJECT_ROOT / "models" / "nnUNet_results",
+    ])
+
+    # 4. 项目内其它预留目录与同级目录探测
+    raw_candidates.extend([
+        DEFAULT_NNUNET_RESULTS,
+        PROJECT_ROOT / "ToothSeg" / "nnUNet_results",
+        PROJECT_ROOT / "ToothSeg",
+        PROJECT_ROOT.parent / "ToothSeg",
+        PROJECT_ROOT.parent / "ToothSeg" / "nnUNet_results",
+        PROJECT_ROOT.parent / "model_weights",
+        PROJECT_ROOT.parent / "nnUNet_results",
+        TOOTHSEG_ROOT / "nnUNet_results",
+    ])
+
+    # 5. 动态检测当前工作盘符下的 ToothSegWork，避免死绑 D 盘
+    anchor = PROJECT_ROOT.anchor or "C:/"
+    raw_candidates.append(Path(f"{anchor}/ToothSegWork/nnUNet_results"))
+    raw_candidates.append(Path(f"{anchor}/ToothSegWork"))
+    if anchor.upper().startswith("C"):
+        raw_candidates.append(Path("D:/ToothSegWork/nnUNet_results"))
+
+    expanded = []
+    for candidate in raw_candidates:
+        expanded.append(candidate)
+        if candidate.name.lower() != "nnunet_results":
+            expanded.append(candidate / "nnUNet_results")
+    return _unique_paths(expanded)
+
+
+def _fuzzy_find_checkpoint(candidate: Path) -> tuple[Path, Path] | None:
+    """容错深搜：在候选目录下查找 Dataset121 权重文件。
+    
+    哪怕用户解压时多包了同名文件夹或解压在子目录，也能自动识别。
+    返回: (nnunet_results_root, checkpoint_path) 或 None
+    """
+    if not candidate.exists() or not candidate.is_dir():
+        return None
+
+    # 1. 快速精确探测
+    exact = candidate / SEMANTIC_CHECKPOINT_RELATIVE
+    if exact.is_file():
+        return candidate, exact
+
+    # 2. 检查 candidate 本身是否就是 Dataset121 目录
+    if candidate.name.lower().startswith("dataset121"):
+        exact_sub = candidate / f"{SEMANTIC_TRAINER}__nnUNetPlans__{SEMANTIC_CONFIGURATION}" / f"fold_{SEMANTIC_FOLD}" / SEMANTIC_CHECKPOINT
+        if exact_sub.is_file():
+            return candidate.parent, exact_sub
+
+    # 3. 递归探测（向下最多探测 4 层，寻找 checkpoint_final.pth）
+    try:
+        for pth in candidate.glob("*/**/checkpoint_final.pth"):
+            pth_str = str(pth).replace("\\", "/").lower()
+            if "dataset121" in pth_str and f"fold_{SEMANTIC_FOLD}" in pth_str:
+                parts = pth.resolve().parts
+                for i, part in enumerate(parts):
+                    if part.lower().startswith("dataset121"):
+                        return Path(*parts[:i]), pth
+    except Exception:
+        pass
+
+    return None
+
+
+def _resolve_model_paths() -> tuple[Path, Path, bool]:
+    """解析可用的 nnUNet_results 根目录与权重文件路径。"""
+    candidates = _candidate_nnunet_results_roots()
+    for candidate in candidates:
+        match = _fuzzy_find_checkpoint(candidate)
+        if match:
+            return match[0], match[1], True
+
+    # 未找到时给出默认预估路径
+    default_root = PROJECT_ROOT / "models"
+    return default_root, default_root / SEMANTIC_CHECKPOINT_RELATIVE, False
+
+
+def _resolve_nnunet_results() -> Path:
+    root, _, _ = _resolve_model_paths()
+    return root
+
+
+NNUNET_RESULTS = _resolve_nnunet_results()
+
+
 def toothseg_status() -> dict[str, Any]:
-    nnunet_results = _resolve_nnunet_results()
-    checkpoint = nnunet_results / SEMANTIC_CHECKPOINT_RELATIVE
+    nnunet_results, checkpoint_path, checkpoint_exists = _resolve_model_paths()
     try:
         predict_exe = _nnunet_predict_exe()
     except Exception as exc:
@@ -183,17 +355,27 @@ def toothseg_status() -> dict[str, Any]:
     else:
         exe_error = None
 
+    is_available = bool(checkpoint_exists and predict_exe)
+    if is_available:
+        help_msg = "ToothSeg 语义模型与权重均已就绪。"
+    elif not predict_exe:
+        help_msg = "未找到 nnUNetv2_predict，请使用包含 nnU-Net v2 的 Conda 环境启动。"
+    else:
+        help_msg = "未检测到模型权重。请将 ToothSeg 解压至项目的 models/ 目录，或在界面点击【选择模型文件夹】。"
+
     return {
-        "available": bool(checkpoint.exists() and predict_exe),
+        "available": is_available,
         "toothseg_root": str(TOOTHSEG_ROOT),
         "runtime_root": str(RUNTIME_ROOT),
         "nnunet_results": str(nnunet_results),
         "nnunet_results_candidates": [str(p) for p in _candidate_nnunet_results_roots()],
-        "checkpoint_path": str(checkpoint),
-        "checkpoint_exists": checkpoint.exists(),
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_exists": checkpoint_exists,
         "predict_exe": predict_exe,
+        "help_message": help_msg,
         "error": exe_error,
     }
+
 
 
 def _copy_input_to_ascii_workspace(image_path: Path, case_dir: Path) -> Path:
@@ -431,7 +613,15 @@ def _checkpoint_identity() -> dict[str, Any]:
     }
 
 
-def _task_key(source_sha256: str, mode: str, spacing: float) -> str:
+def _task_key(
+    source_sha256: str,
+    mode: str,
+    spacing: float,
+    profile_name: str | None = None,
+    profile: dict[str, Any] | None = None,
+) -> str:
+    if profile is None:
+        profile_name, profile = _validated_inference_profile(profile_name)
     identity = {
         "source_sha256": source_sha256,
         "model_id": "toothseg-semantic-05mm",
@@ -442,6 +632,7 @@ def _task_key(source_sha256: str, mode: str, spacing: float) -> str:
         "checkpoint": _checkpoint_identity(),
         "mode": mode,
         "spacing_mm": spacing,
+        "inference_profile": _profile_task_identity(profile_name or "low_vram", profile),
     }
     raw = json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:20]
@@ -485,13 +676,15 @@ def inspect_reuse_package(
     model_id: str = "toothseg-semantic-05mm",
     mode: str = "balanced",
     spacing_mm: float | None = None,
+    inference_profile: str | None = None,
 ) -> dict[str, Any]:
     source = Path(image_path)
     if not source.exists():
         raise FileNotFoundError(f"图像不存在: {image_path}")
     source_sha256 = _whole_file_sha256(source)
     spacing = _mode_spacing(mode, spacing_mm)
-    key = _task_key(source_sha256, mode, spacing)
+    profile_name, profile = _validated_inference_profile(inference_profile)
+    key = _task_key(source_sha256, mode, spacing, profile_name, profile)
     root = _reuse_package_root(source)
     card_path = root / "reuse_card.json"
     card = _load_json(card_path, {})
@@ -518,6 +711,8 @@ def inspect_reuse_package(
         "reuse_dir": str(root),
         "reuse_card": str(card_path),
         "task_key": key,
+        "inference_profile": profile_name,
+        "inference_profile_config": _profile_task_identity(profile_name, profile),
         "exists": root.exists(),
         "can_reuse": resume_from != "none",
         "resume_from": resume_from,
@@ -542,6 +737,7 @@ def run_toothseg_semantic(
     case_id: str,
     mode: str = "balanced",
     spacing_mm: float | None = None,
+    inference_profile: str | None = None,
     output_dir: str | None = None,
     device: str = "cuda",
     overwrite: bool = False,
@@ -590,12 +786,21 @@ def run_toothseg_semantic(
 
     ensure_not_cancelled()
     spacing = _mode_spacing(mode, spacing_mm)
+    profile_name, profile = _validated_inference_profile(inference_profile)
+    device = str(profile.get("device") or device or "cuda")
     spacing_tag = str(spacing).replace(".", "")
     safe_case = _safe_name(_source_stem(source))
     prediction_id = f"pred-{int(time.time())}"
-    progress(8, "hash_input", "正在计算输入影像指纹，用于判断是否可复用。", prediction_id=prediction_id)
+    progress(
+        8,
+        "hash_input",
+        "正在计算输入影像指纹，用于判断是否可复用。",
+        prediction_id=prediction_id,
+        inference_profile=profile_name,
+        inference_profile_config=_profile_task_identity(profile_name, profile),
+    )
     source_sha256 = _whole_file_sha256(source)
-    task_key = _task_key(source_sha256, mode, spacing)
+    task_key = _task_key(source_sha256, mode, spacing, profile_name, profile)
 
     ensure_not_cancelled()
     if keep_reuse:
@@ -614,6 +819,8 @@ def run_toothseg_semantic(
             "model_id": "toothseg-semantic-05mm",
             "mode": mode,
             "spacing_mm": spacing,
+            "inference_profile": profile_name,
+            "inference_profile_config": _profile_task_identity(profile_name, profile),
             "status": "created",
             "can_reuse": False,
             "resume_from": "none",
@@ -633,6 +840,8 @@ def run_toothseg_semantic(
         result_path = case_dir / "result.json"
 
     expected_mask = semantic_dir / f"{safe_case}.nii.gz"
+    if profile.get("engine") == "memsafe_subprocess":
+        expected_mask = semantic_dir / "step1_semseg_branch" / f"{safe_case}.nii.gz"
     project_mask = semantic_dir / f"{safe_case}_project_labels.nii.gz"
     ensure_not_cancelled()
     final_info = _inspect_image(expected_mask, require_nonzero=True)
@@ -647,6 +856,8 @@ def run_toothseg_semantic(
                 "model_id": "toothseg-semantic-05mm",
                 "mode": mode,
                 "spacing_mm": spacing,
+                "inference_profile": profile_name,
+                "inference_profile_config": _profile_task_identity(profile_name, profile),
                 "status": "export_done",
                 "can_reuse": True,
                 "resume_from": "final",
@@ -670,6 +881,8 @@ def run_toothseg_semantic(
             "reuse_dir": str(reuse_root) if reuse_root else None,
             "reuse_card": str(card_path) if card_path else None,
             "spacing_mm": spacing,
+            "inference_profile": profile_name,
+            "inference_profile_config": _profile_task_identity(profile_name, profile),
             "mask_info": mask_info,
             "mapping_info": mapping_info,
             "reused": True,
@@ -706,6 +919,8 @@ def run_toothseg_semantic(
                     "model_id": "toothseg-semantic-05mm",
                     "mode": mode,
                     "spacing_mm": spacing,
+                    "inference_profile": profile_name,
+                    "inference_profile_config": _profile_task_identity(profile_name, profile),
                     "status": "failed_unusable",
                     "can_reuse": False,
                     "resume_from": "none",
@@ -725,6 +940,8 @@ def run_toothseg_semantic(
                 "model_id": "toothseg-semantic-05mm",
                 "mode": mode,
                 "spacing_mm": spacing,
+                "inference_profile": profile_name,
+                "inference_profile_config": _profile_task_identity(profile_name, profile),
                 "status": "preprocess_done",
                 "can_reuse": True,
                 "resume_from": "preprocess",
@@ -737,49 +954,91 @@ def run_toothseg_semantic(
             })
 
     env = os.environ.copy()
+    for key, value in (profile.get("thread_limits") or {}).items():
+        env[str(key)] = str(value)
+    if profile.get("torch_alloc_conf"):
+        env["PYTORCH_CUDA_ALLOC_CONF"] = str(profile["torch_alloc_conf"])
     env.update(
         {
             "nnUNet_raw": str(NNUNET_RAW),
             "nnUNet_preprocessed": str(NNUNET_PREPROCESSED),
             "nnUNet_results": str(nnunet_results),
             "nnUNet_compile": "F",
-            "OMP_NUM_THREADS": "1",
-            "MKL_NUM_THREADS": "1",
-            "OPENBLAS_NUM_THREADS": "1",
-            "NUMEXPR_NUM_THREADS": "1",
-            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "TOOTHSEG_HOME": str(MODEL_ROOT / "toothseg"),
+            "TOOTHSEG_NNUNET_RESULTS": str(nnunet_results),
         }
     )
 
-    cmd = [
-        _nnunet_predict_exe(),
-        "-i",
-        str(images_dir),
-        "-o",
-        str(semantic_dir),
-        "-d",
-        SEMANTIC_DATASET_ID,
-        "-c",
-        SEMANTIC_CONFIGURATION,
-        "-tr",
-        SEMANTIC_TRAINER,
-        "-f",
-        SEMANTIC_FOLD,
-        "-chk",
-        SEMANTIC_CHECKPOINT,
-        "-device",
-        device,
-        "--disable_tta",
-        "-npp",
-        "1",
-        "-nps",
-        "1",
-    ]
+    step_size = str(profile.get("step_size", 0.75))
+    npp = str(profile.get("npp", 1))
+    nps = str(profile.get("nps", 1))
+    if profile.get("engine") == "memsafe_subprocess":
+        cmd = [
+            sys.executable,
+            str(MODEL_ROOT / "toothseg" / "run_toothseg.py"),
+            "-i",
+            str(images_dir),
+            "-o",
+            str(semantic_dir),
+            "-f",
+            SEMANTIC_FOLD,
+            "--mode",
+            "sem",
+            "--step-size",
+            step_size,
+            "--np",
+            nps,
+        ]
+        if not profile.get("disable_tta", True):
+            cmd.append("--tta")
+        if not profile.get("save_probability_blocks", False):
+            cmd.append("--no-probs-cache")
+    else:
+        cmd = [
+            _nnunet_predict_exe(),
+            "-i",
+            str(images_dir),
+            "-o",
+            str(semantic_dir),
+            "-d",
+            SEMANTIC_DATASET_ID,
+            "-c",
+            SEMANTIC_CONFIGURATION,
+            "-tr",
+            SEMANTIC_TRAINER,
+            "-f",
+            SEMANTIC_FOLD,
+            "-chk",
+            SEMANTIC_CHECKPOINT,
+            "-device",
+            device,
+            "-step_size",
+            step_size,
+            "-npp",
+            npp,
+            "-nps",
+            nps,
+        ]
+        if profile.get("disable_tta", True):
+            cmd.append("--disable_tta")
+        if profile.get("save_probabilities", False):
+            cmd.append("--save_probabilities")
+
+    # 当前 nnU-Net v2 版本要求 npp/nps 至少为 1。单病例推理时设置为 1 可限制
+    # 预处理与导出并行度，降低 RAM 压力；若传 0 会在启动阶段直接报错退出。
 
     semantic_dir.mkdir(parents=True, exist_ok=True)
     ensure_not_cancelled()
-    progress(40, "start_nnunet", "正在启动 nnU-Net 语义分割进程。", prediction_id=prediction_id, task_key=task_key)
-    _log("启动 nnUNetv2_predict，后端窗口会实时显示进度")
+    progress(
+        40,
+        "start_nnunet",
+        f"正在启动 nnU-Net 语义分割进程，推理配置: {profile_name}。",
+        prediction_id=prediction_id,
+        task_key=task_key,
+        inference_profile=profile_name,
+        inference_profile_config=_profile_task_identity(profile_name, profile),
+    )
+    _log(f"启动 nnU-Net 推理引擎: {profile.get('engine')} / profile={profile_name}")
     _log("命令: " + " ".join(cmd))
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -826,6 +1085,8 @@ def run_toothseg_semantic(
                             "model_id": "toothseg-semantic-05mm",
                             "mode": mode,
                             "spacing_mm": spacing,
+                            "inference_profile": profile_name,
+                            "inference_profile_config": _profile_task_identity(profile_name, profile),
                             "status": "cancelled_reusable",
                             "can_reuse": True,
                             "resume_from": "preprocess",
@@ -856,6 +1117,8 @@ def run_toothseg_semantic(
                         "nnU-Net 语义分割正在运行。",
                         prediction_id=prediction_id,
                         task_key=task_key,
+                        inference_profile=profile_name,
+                        inference_profile_config=_profile_task_identity(profile_name, profile),
                         last_log=line_text[-300:],
                     )
             return_code = process.wait()
@@ -868,6 +1131,8 @@ def run_toothseg_semantic(
                 "model_id": "toothseg-semantic-05mm",
                 "mode": mode,
                 "spacing_mm": spacing,
+                "inference_profile": profile_name,
+                "inference_profile_config": _profile_task_identity(profile_name, profile),
                 "status": "failed_reusable",
                 "can_reuse": True,
                 "resume_from": "preprocess",
@@ -887,6 +1152,8 @@ def run_toothseg_semantic(
                 "model_id": "toothseg-semantic-05mm",
                 "mode": mode,
                 "spacing_mm": spacing,
+                "inference_profile": profile_name,
+                "inference_profile_config": _profile_task_identity(profile_name, profile),
                 "status": "failed_reusable",
                 "can_reuse": True,
                 "resume_from": "preprocess",
@@ -897,7 +1164,7 @@ def run_toothseg_semantic(
                 },
                 "last_message": "模型推理失败，下次可跳过降采样后重新推理。",
             })
-        raise RuntimeError(f"nnUNetv2_predict 运行失败，日志见: {log_path}")
+        raise RuntimeError(f"nnU-Net 推理进程运行失败，日志见: {log_path}")
     progress(80, "validate_output", "模型进程已结束，正在检查分割输出文件。", prediction_id=prediction_id, task_key=task_key)
     final_info = _inspect_image(expected_mask, require_nonzero=True)
     if not final_info.get("valid"):
@@ -912,6 +1179,8 @@ def run_toothseg_semantic(
                 "model_id": "toothseg-semantic-05mm",
                 "mode": mode,
                 "spacing_mm": spacing,
+                "inference_profile": profile_name,
+                "inference_profile_config": _profile_task_identity(profile_name, profile),
                 "status": "failed_reusable",
                 "can_reuse": True,
                 "resume_from": "preprocess",
@@ -947,6 +1216,8 @@ def run_toothseg_semantic(
         "reuse_card": str(card_path) if card_path else None,
         "task_key": task_key,
         "spacing_mm": spacing,
+        "inference_profile": profile_name,
+        "inference_profile_config": _profile_task_identity(profile_name, profile),
         "device": device,
         "resample_info": resample_info,
         "mask_info": mask_info,
@@ -961,6 +1232,8 @@ def run_toothseg_semantic(
             "model_id": "toothseg-semantic-05mm",
             "mode": mode,
             "spacing_mm": spacing,
+            "inference_profile": profile_name,
+            "inference_profile_config": _profile_task_identity(profile_name, profile),
             "status": "export_done",
             "can_reuse": True,
             "resume_from": "final",

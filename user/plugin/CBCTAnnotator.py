@@ -299,6 +299,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.modelCombo = qt.QComboBox()
         self.modeCombo = qt.QComboBox()
         self.templateCombo = qt.QComboBox()
+        self.labelMappingCombo = qt.QComboBox()
         self.modeCombo.addItem("balanced")
         self.modeCombo.setCurrentText("balanced")
         self.modeCombo.setEnabled(False)
@@ -306,6 +307,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         form.addRow("模型", self.modelCombo)
         form.addRow("模式", self.modeCombo)
         form.addRow("标签", self.templateCombo)
+        form.addRow("牙位顺序", self.labelMappingCombo)
         layout.addLayout(form)
 
         self.modelSupportLabel = qt.QLabel("等待服务返回模型配置")
@@ -554,6 +556,8 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         if hasattr(self, "spacingSpin"):
             self._settings.setValue("spacing_mm", f"{self._current_spacing_mm():.2f}")
         self._settings.setValue("template_id", _combo_text(self.templateCombo))
+        if hasattr(self, "labelMappingCombo"):
+            self._settings.setValue("label_mapping", str(self._current_label_mapping() or ""))
         if hasattr(self, "keepReuseCheck"):
             self._settings.setValue(
                 "keep_reuse", "true" if self.keepReuseCheck.isChecked() else "false")
@@ -563,6 +567,16 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             return 0.75
         value = _spin_value(self.spacingSpin)
         return max(0.5, min(2.0, round(value, 2)))
+
+    def _current_label_mapping(self):
+        if not hasattr(self, "labelMappingCombo"):
+            return None
+        ids = getattr(self, "_label_mapping_ids", [])
+        names = getattr(self, "_label_mapping_names", [])
+        text = _combo_text(self.labelMappingCombo)
+        if text and text in names:
+            return ids[names.index(text)]
+        return None
 
     def _on_spacing_changed(self, *args):
         spacing = self._current_spacing_mm()
@@ -852,6 +866,20 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
                 self.label_rules = template.get("labels", []) or []
         if self.templateCombo.findText(last_template) >= 0:
             self.templateCombo.setCurrentText(last_template)
+
+        lm = cfg.get("label_mappings") or {}
+        self.labelMappingCombo.clear()
+        self._label_mapping_ids = []
+        self._label_mapping_names = []
+        for option in lm.get("options", []):
+            name = option.get("name", option.get("id", "?"))
+            self.labelMappingCombo.addItem(name)
+            self._label_mapping_ids.append(option.get("id", ""))
+            self._label_mapping_names.append(name)
+        last_mapping = str(self._settings.value("label_mapping", lm.get("default", "")))
+        if last_mapping and last_mapping in self._label_mapping_ids:
+            self.labelMappingCombo.setCurrentText(
+                self._label_mapping_names[self._label_mapping_ids.index(last_mapping)])
 
         if not self.active_label_collection:
             self._populate_label_table([])
@@ -1261,6 +1289,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
                     output_format="nii.gz",
                     keep_reuse=self.keepReuseCheck.isChecked(),
                     spacing_mm=spacing_mm,
+                    label_mapping=self._current_label_mapping(),
                 )
             except ApiError as e:
                 self._pending_predict_error = e

@@ -102,6 +102,7 @@ class ApiClient:
         output_dir=None,
         keep_reuse=True,
         spacing_mm=None,
+        label_mapping=None,
     ):
         payload = {
             "case_id": case_id,
@@ -117,6 +118,8 @@ class ApiClient:
             payload["spacing_mm"] = float(spacing_mm)
         if output_dir:
             payload["output_dir"] = output_dir
+        if label_mapping:
+            payload["label_mapping"] = label_mapping
         return self._request("POST", "/predict", payload)
 
     def predict_progress(self, case_id):

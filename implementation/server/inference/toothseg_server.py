@@ -50,6 +50,7 @@ from implementation.model.toothseg_semantic import (  # noqa: E402
     delete_reuse_package,
     inspect_reuse_package,
     list_inference_profiles,
+    list_label_mappings,
     run_toothseg_semantic,
     set_custom_model_root,
     stage_image_for_reading,
@@ -237,6 +238,7 @@ class PredictRequest(BaseModel):
     keep_reuse: bool = True
     spacing_mm: Optional[float] = None
     inference_profile: Optional[str] = None
+    label_mapping: Optional[str] = None
 
 
 class ReuseRequest(BaseModel):
@@ -414,6 +416,7 @@ def config():
                 "labels": LABEL_SPEC,
             },
         ],
+        label_mappings=list_label_mappings(),
     )
 
 
@@ -565,6 +568,7 @@ def predict(req: PredictRequest):
             output_dir=req.output_dir,
             device="cuda",
             keep_reuse=req.keep_reuse,
+            label_mapping=req.label_mapping,
             progress_callback=progress_callback,
             cancel_checker=cancel_event.is_set,
         )

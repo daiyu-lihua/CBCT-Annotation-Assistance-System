@@ -76,10 +76,37 @@ SEMANTIC_CHECKPOINT_RELATIVE = (
     / f"fold_{SEMANTIC_FOLD}"
     / SEMANTIC_CHECKPOINT
 )
-TOOTHSEG_TO_PROJECT_DENSE = {
-    **{i: i for i in range(1, 17)},
-    **{i: i + 32 for i in range(17, 33)},
+LABEL_MAPPINGS = {
+    "natural_default": {
+        # ToothSeg 原版四分区顺序：上颌 1-8(右上) 9-16(左上)，下颌 17-24(左下) 25-32(右下)
+        **{i: i for i in range(1, 17)},
+        **{i: i + 32 for i in range(17, 33)},
+    },
+    "natural_ltr": {
+        # 上颌（ToothSeg 1-16 → dense 1-16），按患者「从左往右」重排：
+        # 患者左侧 FDI 21-28（ToothSeg 9-16，最左为第三磨牙）→ 位置 01-08
+        16: 1, 15: 2, 14: 3, 13: 4, 12: 5, 11: 6, 10: 7, 9: 8,
+        # 患者右侧 FDI 11-18（ToothSeg 1-8，中间为中切牙）→ 位置 09-16
+        1: 9, 2: 10, 3: 11, 4: 12, 5: 13, 6: 14, 7: 15, 8: 16,
+        # 下颌（ToothSeg 17-32 → dense 49-64），按患者「从左往右」重排：
+        # 患者左侧 FDI 31-38（ToothSeg 17-24，最左为第三磨牙）→ 位置 01-08
+        24: 49, 23: 50, 22: 51, 21: 52, 20: 53, 19: 54, 18: 55, 17: 56,
+        # 患者右侧 FDI 41-48（ToothSeg 25-32，中间为中切牙）→ 位置 09-16
+        25: 57, 26: 58, 27: 59, 28: 60, 29: 61, 30: 62, 31: 63, 32: 64,
+    },
 }
+LABEL_MAPPING_DEFAULT = "natural_default"
+
+
+def list_label_mappings() -> dict[str, Any]:
+    """列出可用的牙位标签转换方案（供前端下拉选择）。"""
+    return {
+        "default": LABEL_MAPPING_DEFAULT,
+        "options": [
+            {"id": "natural_default", "name": "teeth-dense-96（原版顺序）"},
+            {"id": "natural_ltr", "name": "牙列统一编号（患者从左往右）"},
+        ],
+    }
 
 DEFAULT_INFERENCE_PROFILE = {
     "description": "Built-in conservative low VRAM profile.",
@@ -442,7 +469,7 @@ def _project_code_from_dense(dense_label: int) -> int:
     return dense_label
 
 
-def _ensure_project_label_mask(raw_mask_path: Path, project_mask_path: Path) -> dict[str, Any]:
+def _ensure_project_label_mask(raw_mask_path: Path, project_mask_path: Path, label_mapping: str = LABEL_MAPPING_DEFAULT) -> dict[str, Any]:
     """Map ToothSeg semantic labels 1-32 to this project's dense natural-tooth labels.
 
     ToothSeg Dataset121 uses 1-16 for upper teeth and 17-32 for lower teeth. In
@@ -454,7 +481,9 @@ def _ensure_project_label_mask(raw_mask_path: Path, project_mask_path: Path) -> 
     img = sitk.ReadImage(str(raw_mask_path))
     raw = sitk.GetArrayFromImage(img).astype(np.uint8, copy=False)
     project = np.zeros_like(raw, dtype=np.uint8)
-    for src, dst in TOOTHSEG_TO_PROJECT_DENSE.items():
+    mapping_name = label_mapping if label_mapping in LABEL_MAPPINGS else LABEL_MAPPING_DEFAULT
+    mapping = LABEL_MAPPINGS[mapping_name]
+    for src, dst in mapping.items():
         project[raw == src] = dst
 
     out = sitk.GetImageFromArray(project)
@@ -491,7 +520,7 @@ def _ensure_project_label_mask(raw_mask_path: Path, project_mask_path: Path) -> 
         })
 
     mapping_info = {
-        "mapping": "toothseg_1_32_to_project_dense_natural_teeth",
+        "mapping": mapping_name,
         "raw_mask_path": str(raw_mask_path),
         "project_mask_path": str(project_mask_path),
         "labels": labels,
@@ -742,6 +771,7 @@ def run_toothseg_semantic(
     device: str = "cuda",
     overwrite: bool = False,
     keep_reuse: bool = True,
+    label_mapping: str = LABEL_MAPPING_DEFAULT,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     cancel_checker: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -847,7 +877,7 @@ def run_toothseg_semantic(
     final_info = _inspect_image(expected_mask, require_nonzero=True)
     if final_info.get("valid") and not overwrite:
         progress(88, "map_labels", "检测到可复用结果，正在映射为项目标签编号。", prediction_id=prediction_id, task_key=task_key)
-        mapping_info = _ensure_project_label_mask(expected_mask, project_mask)
+        mapping_info = _ensure_project_label_mask(expected_mask, project_mask, label_mapping=label_mapping)
         mask_info = _inspect_mask(project_mask)
         _log(f"复用已有最终结果并映射到项目标签: {project_mask}")
         if keep_reuse:
@@ -1195,7 +1225,7 @@ def run_toothseg_semantic(
         raise RuntimeError(f"ToothSeg 未生成预期输出文件: {expected_mask}，日志见: {log_path}")
 
     progress(88, "map_labels", "正在将 ToothSeg 标签映射为项目标签编号。", prediction_id=prediction_id, task_key=task_key)
-    mapping_info = _ensure_project_label_mask(expected_mask, project_mask)
+    mapping_info = _ensure_project_label_mask(expected_mask, project_mask, label_mapping=label_mapping)
     progress(94, "inspect_mask", "正在统计最终分割结果。", prediction_id=prediction_id, task_key=task_key)
     mask_info = _inspect_mask(project_mask)
     _log(

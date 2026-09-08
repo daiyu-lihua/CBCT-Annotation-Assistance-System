@@ -230,16 +230,15 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
 
         panels = [
             self._build_service_panel(),
-            self._build_case_panel(),
             self._build_predict_panel(),
-            self._build_correction_panel(),
-            self._build_label_panel(),
+            self._build_correction_label_panel(),
             self._build_quality_export_panel(),
             self._build_log_panel(),
         ]
         for panel in panels:
             main.addWidget(panel)
         main.addStretch(1)
+        self._update_service_indicator(_WARN, "正在检测本地服务...")
 
         self.predictTimer = qt.QTimer()
         self.predictTimer.setInterval(1000)
@@ -255,7 +254,75 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
     # ---------- UI builders ----------
 
     def _build_service_panel(self):
-        panel, layout = _make_panel("服务与模型")
+        area = qt.QFrame()
+        layout = qt.QVBoxLayout(area)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        top_row = qt.QHBoxLayout()
+        top_row.setSpacing(8)
+
+        # 左：服务方框（圆点 + 服务，点击弹窗）+ 状态小字（居中）
+        svc_col = qt.QWidget()
+        svc_layout = qt.QVBoxLayout(svc_col)
+        svc_layout.setContentsMargins(0, 0, 0, 0)
+        svc_layout.setSpacing(4)
+
+        self.serviceBtn = qt.QPushButton("●")
+        self.serviceBtn.setFixedSize(44, 44)
+        self.serviceBtn.setToolTip("点击查看服务连接详情")
+        self.serviceBtn.clicked.connect(self._on_show_service_dialog)
+        svc_layout.addWidget(self.serviceBtn, 0, qt.Qt.AlignHCenter)
+
+        self.serviceUnderLabel = qt.QLabel("正在检测本地服务...")
+        self.serviceUnderLabel.setObjectName("hint")
+        self.serviceUnderLabel.setWordWrap(True)
+        self.serviceUnderLabel.setAlignment(qt.Qt.AlignHCenter)
+        svc_layout.addWidget(self.serviceUnderLabel)
+
+        # 模型与分割小框（齿轮，点击弹窗）+ 小字
+        self.modelBoxBtn = qt.QPushButton("⚙")
+        self.modelBoxBtn.setFixedSize(44, 44)
+        self.modelBoxBtn.setStyleSheet(
+            "font-size: 18px; border: 1px solid #a0a0a0; border-radius: 0px; background: #f5f5f5;")
+        self.modelBoxBtn.setToolTip("点击打开模型与分割设置")
+        self.modelBoxBtn.clicked.connect(self._on_show_predict_dialog)
+        svc_layout.addWidget(self.modelBoxBtn, 0, qt.Qt.AlignHCenter)
+
+        self.modelBoxLabel = qt.QLabel("模型与分割")
+        self.modelBoxLabel.setObjectName("hint")
+        self.modelBoxLabel.setAlignment(qt.Qt.AlignHCenter)
+        svc_layout.addWidget(self.modelBoxLabel)
+        svc_layout.addStretch(1)
+
+        top_row.addWidget(svc_col, 3)
+
+        # 右：当前病例信息框（占七分）
+        case_box = qt.QGroupBox("当前病例")
+        case_layout = qt.QVBoxLayout(case_box)
+        case_layout.setContentsMargins(6, 2, 6, 2)
+        case_layout.setSpacing(0)
+        self.imageInfoLabel = qt.QLabel(
+            "请使用 Slicer 原生功能打开 CBCT 影像；插件会自动检测、检查可用性并绑定当前病例。"
+        )
+        self.imageInfoLabel.setObjectName("hint")
+        self.imageInfoLabel.setWordWrap(True)
+        case_layout.addWidget(self.imageInfoLabel)
+        top_row.addWidget(case_box, 7)
+
+        layout.addLayout(top_row)
+
+        self._build_service_dialog()
+        self._build_predict_dialog()
+        return area
+
+    def _build_service_dialog(self):
+        self.serviceDialog = qt.QDialog(slicer.util.mainWindow())
+        self.serviceDialog.setWindowTitle("服务连接")
+        self.serviceDialog.setModal(False)
+        dlg = qt.QVBoxLayout(self.serviceDialog)
+        dlg.setContentsMargins(14, 12, 14, 12)
+        dlg.setSpacing(9)
 
         address_row = qt.QHBoxLayout()
         address_row.setSpacing(6)
@@ -267,7 +334,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.refreshBtn = _button("刷新", "primary", 58)
         self.refreshBtn.clicked.connect(self.on_refresh_service)
         address_row.addWidget(self.refreshBtn)
-        layout.addLayout(address_row)
+        dlg.addLayout(address_row)
 
         state_box = qt.QFrame()
         state_box.setObjectName("inlineStatus")
@@ -280,8 +347,45 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.modelStatusLabel.setObjectName("hint")
         state_layout.addWidget(self.connStatusLabel)
         state_layout.addWidget(self.modelStatusLabel)
-        layout.addWidget(state_box)
+        dlg.addWidget(state_box)
 
+        self.serviceDialog.adjustSize()
+
+    def _on_show_service_dialog(self):
+        if not hasattr(self, "serviceDialog"):
+            return
+        self.serviceDialog.adjustSize()
+        try:
+            center = slicer.util.mainWindow().frameGeometry().center()
+            self.serviceDialog.move(center - self.serviceDialog.rect().center())
+        except Exception:
+            pass
+        self.serviceDialog.show()
+        self.serviceDialog.raise_()
+
+    def _update_service_indicator(self, color, text):
+        if hasattr(self, "serviceBtn"):
+            self.serviceBtn.setStyleSheet(
+                f"color: {color}; font-size: 18px; border: 1px solid #a0a0a0; "
+                f"border-radius: 0px; background: #f5f5f5;")
+        if hasattr(self, "serviceUnderLabel"):
+            self.serviceUnderLabel.setText(text)
+            self.serviceUnderLabel.setStyleSheet(f"color: {color};")
+
+    def _build_predict_dialog(self):
+        self.predictDialog = qt.QDialog(slicer.util.mainWindow())
+        self.predictDialog.setWindowTitle("模型与分割")
+        self.predictDialog.setModal(False)
+        layout = qt.QVBoxLayout(self.predictDialog)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(7)
+
+        # 模型目录 + 模式
+        self.modeCombo = qt.QComboBox()
+        self.modeCombo.addItem("balanced")
+        self.modeCombo.setCurrentText("balanced")
+        self.modeCombo.setEnabled(False)
+        self.modeCombo.setToolTip("当前 ToothSeg 接入固定使用 balanced 处理方式")
         model_dir_row = qt.QHBoxLayout()
         model_dir_row.setSpacing(6)
         self.chooseModelDirBtn = _button("📁 模型目录", "ghost", 85)
@@ -292,65 +396,37 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.modelDirLabel.setWordWrap(True)
         model_dir_row.addWidget(self.chooseModelDirBtn)
         model_dir_row.addWidget(self.modelDirLabel, 1)
+        model_dir_row.addWidget(self.modeCombo)
         layout.addLayout(model_dir_row)
 
-        form = qt.QFormLayout()
-        form.setSpacing(5)
+        # 三个横排下拉：模型 / 标签 / 牙位顺序
         self.modelCombo = qt.QComboBox()
-        self.modeCombo = qt.QComboBox()
         self.templateCombo = qt.QComboBox()
         self.labelMappingCombo = qt.QComboBox()
-        self.modeCombo.addItem("balanced")
-        self.modeCombo.setCurrentText("balanced")
-        self.modeCombo.setEnabled(False)
-        self.modeCombo.setToolTip("当前 ToothSeg 接入固定使用 balanced 处理方式")
-        form.addRow("模型", self.modelCombo)
-        form.addRow("模式", self.modeCombo)
-        form.addRow("标签", self.templateCombo)
-        form.addRow("牙位顺序", self.labelMappingCombo)
-        layout.addLayout(form)
+        three = qt.QHBoxLayout()
+        three.setSpacing(8)
+        for title, combo in (("模型：", self.modelCombo),
+                             ("标签：", self.templateCombo),
+                             ("牙位顺序：", self.labelMappingCombo)):
+            col = qt.QVBoxLayout()
+            lbl = qt.QLabel(title)
+            lbl.setObjectName("hint")
+            col.addWidget(lbl)
+            col.addWidget(combo)
+            three.addLayout(col, 1)
+        layout.addLayout(three)
 
         self.modelSupportLabel = qt.QLabel("等待服务返回模型配置")
         self.modelSupportLabel.setObjectName("hint")
         self.modelSupportLabel.setWordWrap(True)
         layout.addWidget(self.modelSupportLabel)
 
-
         try:
             self.modelCombo.currentIndexChanged.connect(self._on_model_changed)
         except Exception:
             pass
-        return panel
 
-    def _build_case_panel(self):
-        panel, layout = _make_panel("当前病例")
-        self.imageInfoLabel = qt.QLabel(
-            "请使用 Slicer 原生功能打开 CBCT 影像；插件会自动检测、检查可用性并绑定当前病例。"
-        )
-        self.imageInfoLabel.setObjectName("hint")
-        self.imageInfoLabel.setWordWrap(True)
-        layout.addWidget(self.imageInfoLabel)
-        return panel
-
-    def _build_predict_panel(self):
-        panel, layout = _make_panel("AI 分割")
-        row = qt.QHBoxLayout()
-        row.setSpacing(6)
-        self.predictBtn = _button("开始分割", "primary", 82)
-        self.predictBtn.clicked.connect(self.on_predict)
-        self.cancelPredictBtn = _button("中止分割", "danger", 82)
-        self.cancelPredictBtn.setEnabled(False)
-        self.cancelPredictBtn.clicked.connect(self.on_cancel_predict)
-        row.addWidget(self.predictBtn)
-        row.addWidget(self.cancelPredictBtn)
-        row.addStretch(1)
-        layout.addLayout(row)
-
-        self.processModeLabel = qt.QLabel("处理方式：balanced（固定）")
-        self.processModeLabel.setObjectName("hint")
-        self.processModeLabel.setWordWrap(True)
-        layout.addWidget(self.processModeLabel)
-
+        # 降采样间距
         spacing_row = qt.QHBoxLayout()
         spacing_row.setSpacing(6)
         spacing_row.addWidget(qt.QLabel("降采样间距"))
@@ -370,7 +446,37 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.spacingHintLabel.setObjectName("hint")
         self.spacingHintLabel.setWordWrap(True)
         layout.addWidget(self.spacingHintLabel)
+
         self._on_spacing_changed()
+        self.predictDialog.adjustSize()
+
+    def _on_show_predict_dialog(self):
+        if not hasattr(self, "predictDialog"):
+            return
+        self.predictDialog.adjustSize()
+        try:
+            center = slicer.util.mainWindow().frameGeometry().center()
+            self.predictDialog.move(center - self.predictDialog.rect().center())
+        except Exception:
+            pass
+        self.predictDialog.show()
+        self.predictDialog.raise_()
+
+    def _build_predict_panel(self):
+        panel, layout = _make_panel("分割执行")
+
+        # 开始/中止
+        row = qt.QHBoxLayout()
+        row.setSpacing(6)
+        self.predictBtn = _button("开始分割", "primary", 82)
+        self.predictBtn.clicked.connect(self.on_predict)
+        self.cancelPredictBtn = _button("中止分割", "danger", 82)
+        self.cancelPredictBtn.setEnabled(False)
+        self.cancelPredictBtn.clicked.connect(self.on_cancel_predict)
+        row.addWidget(self.predictBtn)
+        row.addWidget(self.cancelPredictBtn)
+        row.addStretch(1)
+        layout.addLayout(row)
 
         self.predictProgress = qt.QProgressBar()
         self.predictProgress.setRange(0, 100)
@@ -378,6 +484,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.predictProgress.setFormat("等待开始")
         layout.addWidget(self.predictProgress)
 
+        # 复用包
         reuse_row = qt.QHBoxLayout()
         reuse_row.setSpacing(6)
         self.keepReuseCheck = qt.QCheckBox("保留复用包")
@@ -403,59 +510,77 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.maskLabel.setObjectName("hint")
         self.maskLabel.setWordWrap(True)
         layout.addWidget(self.maskLabel)
+
         return panel
 
-    def _build_correction_panel(self):
-        panel, layout = _make_panel("人工修正")
-        hint = qt.QLabel(
-            "这些按钮会调用 Slicer 自带的 Segment Editor。画笔用于涂抹，擦除用于删去误分割，"
-            "剪刀/闭合曲线适合圈画式修边。"
-        )
+    def _build_correction_label_panel(self):
+        panel, layout = _make_panel("修正与标签")
+
+        split = qt.QHBoxLayout()
+        split.setSpacing(10)
+
+        # 左：人工修正工具（窄栏）
+        left_widget = qt.QWidget()
+        left = qt.QVBoxLayout(left_widget)
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(6)
+        hint = qt.QLabel("调用 Slicer Segment Editor 修正。")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
-        layout.addWidget(hint)
+        left.addWidget(hint)
 
-        row1 = qt.QHBoxLayout()
-        row1.setSpacing(6)
-        self.openEditorBtn = _button("打开编辑", "ghost", 74)
+        self.openEditorBtn = _button("打开编辑", "ghost", 88)
         self.openEditorBtn.clicked.connect(self.on_open_editor)
-        self.paintBtn = _button("涂抹", "ghost", 54)
-        self.paintBtn.clicked.connect(lambda: self.on_activate_segment_effect("Paint"))
-        self.eraseBtn = _button("擦除", "ghost", 54)
-        self.eraseBtn.clicked.connect(lambda: self.on_activate_segment_effect("Erase"))
-        self.drawBtn = _button("圈画", "ghost", 54)
-        self.drawBtn.clicked.connect(lambda: self.on_activate_segment_effect("Draw"))
-        for btn in (self.openEditorBtn, self.paintBtn, self.eraseBtn, self.drawBtn):
-            row1.addWidget(btn)
-        row1.addStretch(1)
-        layout.addLayout(row1)
+        self.openEditorBtn.setFixedHeight(44)
+        left.addWidget(self.openEditorBtn)
 
-        row2 = qt.QHBoxLayout()
-        row2.setSpacing(6)
-        self.scissorsBtn = _button("剪刀", "ghost", 58)
+        self.paintBtn = _button("涂抹", "ghost", 44)
+        self.paintBtn.clicked.connect(lambda: self.on_activate_segment_effect("Paint"))
+        self.eraseBtn = _button("擦除", "ghost", 44)
+        self.eraseBtn.clicked.connect(lambda: self.on_activate_segment_effect("Erase"))
+        self.drawBtn = _button("圈画", "ghost", 44)
+        self.drawBtn.clicked.connect(lambda: self.on_activate_segment_effect("Draw"))
+        self.scissorsBtn = _button("剪刀", "ghost", 44)
         self.scissorsBtn.clicked.connect(lambda: self.on_activate_segment_effect("Scissors"))
-        self.smoothBtn = _button("平滑", "ghost", 58)
+        self.smoothBtn = _button("平滑", "ghost", 44)
         self.smoothBtn.clicked.connect(lambda: self.on_activate_segment_effect("Smoothing"))
-        self.islandsBtn = _button("连通域", "ghost", 66)
+        self.islandsBtn = _button("连通域", "ghost", 44)
         self.islandsBtn.clicked.connect(lambda: self.on_activate_segment_effect("Islands"))
-        self.readCorrectBtn = _button("读取修正", "accent", 82)
+
+        six_btns = [
+            self.paintBtn, self.eraseBtn, self.drawBtn,
+            self.scissorsBtn, self.smoothBtn, self.islandsBtn,
+        ]
+        for b in six_btns:
+            b.setFixedHeight(44)
+        for i in range(0, len(six_btns), 2):
+            r = qt.QHBoxLayout()
+            r.setSpacing(5)
+            r.addWidget(six_btns[i])
+            r.addWidget(six_btns[i + 1])
+            r.addStretch(1)
+            left.addLayout(r)
+
+        self.readCorrectBtn = _button("读取修正", "accent", 88)
         self.readCorrectBtn.clicked.connect(self.on_read_result)
-        for btn in (self.scissorsBtn, self.smoothBtn, self.islandsBtn, self.readCorrectBtn):
-            row2.addWidget(btn)
-        row2.addStretch(1)
-        layout.addLayout(row2)
+        self.readCorrectBtn.setFixedHeight(44)
+        left.addWidget(self.readCorrectBtn)
 
         self.correctLabel = qt.QLabel("尚未进入人工修正")
         self.correctLabel.setObjectName("hint")
         self.correctLabel.setWordWrap(True)
-        layout.addWidget(self.correctLabel)
-        return panel
+        left.addWidget(self.correctLabel)
+        left.addStretch(1)
+        left_widget.setFixedWidth(100)
 
-    def _build_label_panel(self):
-        panel, layout = _make_panel("标签集合与标签列表")
-        row = qt.QHBoxLayout()
-        row.setSpacing(6)
-        row.addWidget(qt.QLabel("标签集合"))
+        # 右：标签集合 + 标签列表（宽栏）
+        right_widget = qt.QWidget()
+        right = qt.QVBoxLayout(right_widget)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(6)
+        set_row = qt.QHBoxLayout()
+        set_row.setSpacing(6)
+        set_row.addWidget(qt.QLabel("标签集合"))
         self.labelSetMenu = qt.QMenu()
         self.labelSetButton = qt.QToolButton()
         self.labelSetButton.setObjectName("labelSetButton")
@@ -464,25 +589,35 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
         self.labelSetButton.setMenu(self.labelSetMenu)
         self.createLabelSetBtn = _button("新建", "ghost", 54)
         self.createLabelSetBtn.clicked.connect(self.on_create_label_collection)
-        row.addWidget(self.labelSetButton, 1)
-        row.addWidget(self.createLabelSetBtn)
-        layout.addLayout(row)
+        set_row.addWidget(self.labelSetButton, 1)
+        set_row.addWidget(self.createLabelSetBtn)
+        right.addLayout(set_row)
 
         self.labelTable = qt.QTableWidget()
         self.labelTable.setColumnCount(4)
         self.labelTable.setHorizontalHeaderLabels(["显示", "标签名称", "颜色", "状态"])
         self.labelTable.setMinimumHeight(210)
         self.labelTable.setMaximumHeight(260)
+        self.labelTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         try:
-            self.labelTable.horizontalHeader().setStretchLastSection(True)
+            header = self.labelTable.horizontalHeader()
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(1, qt.QHeaderView.Stretch)
             self.labelTable.verticalHeader().setVisible(False)
         except Exception:
             pass
-        layout.addWidget(self.labelTable)
+        self.labelTable.setColumnWidth(0, 42)
+        self.labelTable.setColumnWidth(2, 44)
+        self.labelTable.setColumnWidth(3, 76)
+        right.addWidget(self.labelTable)
         self.labelSummaryLabel = qt.QLabel("当前没有标签集合。检测到分割结果或完成模型分割后才会生成列表。")
         self.labelSummaryLabel.setObjectName("hint")
         self.labelSummaryLabel.setWordWrap(True)
-        layout.addWidget(self.labelSummaryLabel)
+        right.addWidget(self.labelSummaryLabel)
+
+        split.addWidget(left_widget, 0)
+        split.addWidget(right_widget, 1)
+        layout.addLayout(split)
         return panel
 
     def _build_quality_export_panel(self):
@@ -776,7 +911,7 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             if hasattr(self, "modelDirLabel"):
                 self.modelDirLabel.setText("模型: 服务未连接")
                 self.modelDirLabel.setStyleSheet(f"color:{_TEXT_DIM};")
-            self._set_status("未连接到本地服务，请先启动后端服务。", _DANGER)
+            self._update_service_indicator(_DANGER, "未连接到本地服务，请先启动后端服务。")
             self._log(f"服务检测失败: {e.error_code} | {e.message}")
             return False
 
@@ -805,10 +940,10 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
                 self.modelDirLabel.setStyleSheet(f"color:{_WARN}; font-weight:bold;")
 
         if loaded:
-            self._set_status("服务与模型均已就绪，可开始分割。", _OK)
+            self._update_service_indicator(_OK, "服务与模型均已就绪，可开始分割。")
         else:
             hint = toothseg.get("help_message") or "模型尚未就绪，请选择模型权重目录。"
-            self._set_status(hint, _WARN)
+            self._update_service_indicator(_OK, hint)
 
         self._log(f"服务连接成功: service={service_name}, device={device_text}, model_loaded={loaded}, ckpt_exists={ckpt_exists}")
         self._save_ui_settings()
@@ -1795,7 +1930,13 @@ class CBCTAnnotatorWidget(ScriptedLoadableModuleWidget):
             self.labelTable.insertRow(row)
             check = qt.QCheckBox()
             check.setChecked(True)
-            self.labelTable.setCellWidget(row, 0, check)
+            check_widget = qt.QWidget()
+            check_layout = qt.QHBoxLayout(check_widget)
+            check_layout.setContentsMargins(0, 0, 0, 0)
+            check_layout.addStretch(1)
+            check_layout.addWidget(check)
+            check_layout.addStretch(1)
+            self.labelTable.setCellWidget(row, 0, check_widget)
 
             value = label.get("value")
             name = label.get("name") or f"Label_{int(value):03d}"
